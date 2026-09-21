@@ -1,0 +1,52 @@
+# Wave scheduler queue — one job per line. Copy this file and edit.
+#
+# Format:  <model_id>  <mode>  [library]  [wave_size]  [queue]  [flags]
+#   model_id  : the model to run (its SIF must be at /shared/sif-files/<model_id>.sif)
+#   mode      : ersilia | singularity
+#   library   : full name or alias (real, molport, coconut, hit, liquid);
+#               optional -> falls back to the driver's default_library arg
+#   wave_size : 1..1000  (optional -> default 1000)
+#   queue     : SLURM partition (optional -> default cpu-queue)
+#   flags     : `hold` parks the job — the driver skips it until you unhold it.
+#               `cpus=N` (1..32) pins SLURM cpus-per-task for THIS job only.
+#               Flags are recognised by shape, so they can appear anywhere after
+#               the model id: `eos3b5e ersilia coconut hold` is fine.
+#
+#   cpus=N is the packing lever. cpu-queue is CR_CPU — SLURM does no memory
+#   accounting there — so cpus-per-task alone decides how many tasks share a
+#   32-vCPU node, and a heavy model left at the default will OOM. Bigger N =
+#   fewer tasks per node = more memory each = slower. Omit it to keep the
+#   worker's own tuned default (ersilia 10, singularity 4).
+#
+# Blank lines and lines starting with '#' (even indented) are ignored.
+#
+# ORDER IS PRIORITY. Jobs run top-to-bottom, one at a time; the next starts when
+# the previous finishes. To prioritize a model, move its line up.
+#
+# THIS FILE IS LIVE. The driver re-reads it before every job, so you can edit it
+# while the queue runs. Prefer sched-ctl.sh — it takes the same lock the driver
+# uses and cannot leave a half-written file:
+#
+#   ./sched-ctl.sh add eos2r5a ersilia coconut --top   # queue it up next
+#   ./sched-ctl.sh top eos74km_v1                      # prioritize
+#   ./sched-ctl.sh hold eos6ojg_v1                     # park it
+#   ./sched-ctl.sh cancel eos12x7_v1                   # stop the running model
+#
+# Hand-editing is supported too. A comment directly above a job line belongs to
+# that job and moves with it when reordered; this banner always stays on top.
+
+# --- examples (edit / delete) ---
+eos4k4f_v1          ersilia      Enamine_Real_Sample_1.4B
+eos2r5a             ersilia      Coconut_715K
+mtb-public-models   singularity  molport                    500
+# uses the driver's default_library (pass it as arg 2 to run-model-queue.sh):
+# eos3b5e           ersilia
+
+# parked until you run: sched-ctl.sh unhold eos12x7_v1
+eos12x7_v1          ersilia      Enamine_Real_Sample_1.4B                     hold
+
+# a memory-hungry model: 8 tasks/node instead of the default packing
+eos11sm_v1          ersilia      Enamine_Real_Sample_1.4B                     cpus=4
+eos6ojg_v1          ersilia      Enamine_Real_Sample_1.4B
+eos74km_v1          ersilia      Enamine_Real_Sample_1.4B
+eos42ez_v1          ersilia      Enamine_Real_Sample_1.4B

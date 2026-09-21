@@ -1,37 +1,74 @@
-# My Ersilia Python Package
+# Running Ersilia models over large chemical libraries
 
-Template repository for an Ersilia Python package.
+Queue up Ersilia models, run them one at a time over a chemical library, and
+watch progress from a terminal dashboard. Jobs are dispatched to an AWS
+ParallelCluster through SLURM; progress is the number of result files in S3, so
+every run resumes where it left off.
 
-This package provides a foundation for developing and distributing Python tools within the Ersilia ecosystem. It is designed to help researchers and developers quickly set up, share, and maintain reproducible code for AI/ML models, particularly in the context of antimicrobial drug discovery. If you are developing a package, use this paragraph as placeholder for an introduction about the package.
+The package is a thin client. All scheduling logic is the bash layer under
+`src/model_launcher/remote/`, which runs on the target machine — the Python side
+only calls `sched-ctl.sh` and parses the snapshot it prints. The two ship
+together so a client can never talk to a scheduler that lacks the feature it is
+asking for.
 
 ## Installation
 
-To get started, create a Conda environment:
-
 ```bash
-conda create -n my_env python=3.12
-conda activate my_env
-```
-
-Then install the package using pip:
-
-```bash
-pip install git+https://github.com/ersilia-os/my-ersilia-python-package.git
+conda create -n model-launcher python=3.12
+conda activate model-launcher
+pip install git+https://github.com/ersilia-os/model-launcher.git
 ```
 
 ## Quick start
 
-Provide an end-to-end usage example. All data should be included in the repository for reproducibility.
-
-Example:
-
-```python
-from my_package.core import hello
-
-hello("Ersilia")
+```bash
+model-launcher --list-hosts                 # which machines can I reach?
+model-launcher --host ai2050cluster check   # is that one reachable?
+model-launcher --host ai2050cluster         # open the dashboard
 ```
 
-This prints `"Hello, Ersilia!"` in the Python terminal.
+`--host` is any alias `ssh` can resolve — a `~/.ssh/config` entry, or a device
+on the Ersilia tailnet reachable over Tailscale SSH. `--list-hosts` only shows
+tailnet machines you actually have a login on: your own devices, plus any
+tagged as shared team infrastructure (`tag:dev`). With no `--host`, everything
+runs on the local machine.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `model-launcher` | Open the dashboard (same as `tui`) |
+| `model-launcher tui` | Watch and steer the queue full-screen |
+| `model-launcher check` | Print transport, driver state and per-job progress, then exit |
+| `model-launcher --list-hosts` | List the SSH machines available as `--host` targets |
+
+Run `--help` on any command for its options.
+
+## The queue
+
+One job per line; blank lines and `#` comments are ignored. Line order **is**
+priority, and the driver re-reads the file before every job, so it can be edited
+while a run is in flight.
+
+```
+<model_id>  <mode>  [library]  [wave_size]  [queue]  [flags]
+```
+
+`mode` is `ersilia` or `singularity`. Flags are `hold` (park the job) and
+`cpus=N` (override the per-task CPU count), recognised anywhere after the model
+id. Omitting `cpus` leaves the worker's own `#SBATCH` default in charge.
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest          # 84 tests, no cluster and no AWS credentials needed
+ruff check . && ruff format .
+```
+
+The test suite drives the real bash scheduler against a fake S3 fixture
+(`SCHED_FAKE_S3`) and a fake orchestrator (`--dry-run`), with recording stubs for
+`aws`, `sbatch`, `squeue` and `scancel` on `PATH`.
 
 ## About the Ersilia Open Source Initiative
 

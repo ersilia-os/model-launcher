@@ -1,0 +1,295 @@
+/* ==========================================================================
+   scheduler-tui stylesheet
+   ==========================================================================
+   Colours come from the registered theme (see theme.py), NOT from literals here,
+   so Textual's own widgets — footer, toasts, modals, Select dropdowns — sit in the
+   same palette as our table instead of showing default slate through the gaps.
+
+   Design principle: the running row is the only luminous thing on screen, and
+   warmth always means attention. So the chrome is deliberately quiet — panels a
+   half-step off the background, hairline rules, no filled blocks except where
+   something needs a human.
+   ========================================================================== */
+
+Screen {
+    layers: base overlay;
+    background: $background;
+}
+
+/* ---- header -------------------------------------------------------------- */
+#hdr {
+    height: auto;
+    padding: 0 1;
+    background: $surface;
+}
+#hdr-title {
+    text-style: bold;
+    color: $primary;
+}
+#hdr-meta {
+    color: $text-muted;
+}
+
+/* The banner is an inset warning, not a filled alarm bar: a full-bleed saturated
+   block dominates a screen you are meant to watch for hours. */
+#banner {
+    display: none;
+    padding: 0 1;
+    margin: 0 1;
+    background: $surface;
+    color: $warning;
+    border-left: thick $warning;
+}
+#banner.visible { display: block; }
+#banner.-error {
+    color: $error;
+    border-left: thick $error;
+}
+
+/* ---- status chips (clickable filters) ------------------------------------ */
+#chips {
+    height: 1;
+    padding: 0 1;
+    background: $background;
+    layout: horizontal;
+    overflow-x: hidden;
+}
+.chip {
+    padding: 0 1;
+    margin: 0 1 0 0;
+    height: 1;
+    width: auto;
+    min-width: 0;
+    border: none;
+    background: $background;
+    color: $text-muted;
+    text-style: none;
+}
+.chip:hover {
+    background: $panel;
+    color: $foreground;
+}
+.chip.-active {
+    background: $primary 25%;
+    color: $foreground;
+    text-style: bold;
+}
+/* A status with no jobs is hidden rather than dimmed — nothing to filter to. */
+.chip.-hidden { display: none; }
+
+/* ---- toolbar ------------------------------------------------------------- */
+#toolbar {
+    height: 1;
+    padding: 0 1;
+    background: $background;
+}
+/* Tinted, not plain text: these need to read as controls you can click, but must
+   not shout over the table. A dim primary tint plus a bracket-free label is enough
+   affordance once the hover state is obvious. */
+#toolbar Button {
+    height: 1;
+    min-width: 0;
+    width: auto;
+    padding: 0 1;
+    margin: 0 1 0 0;
+    border: none;
+    background: $panel;
+    color: $primary;
+    text-style: none;
+}
+#toolbar Button:hover {
+    background: $primary;
+    color: $background;
+    text-style: bold;
+}
+#toolbar Button.-danger { color: $error; }
+#toolbar Button.-danger:hover {
+    background: $error;
+    color: $background;
+    text-style: bold;
+}
+#toolbar-spacer { width: 1fr; }
+
+/* ---- the queue table ----------------------------------------------------- */
+#table-wrap {
+    height: 1fr;
+}
+QueueTable {
+    height: 100%;
+    border: none;
+    background: $background;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $background;
+    scrollbar-color: $panel;
+    scrollbar-color-hover: $primary;
+}
+QueueTable > .datatable--header {
+    background: $background;
+    color: $text-muted;
+    text-style: none;
+}
+QueueTable > .datatable--cursor {
+    background: $block-cursor-background;
+    color: $block-cursor-foreground;
+    text-style: $block-cursor-text-style;
+}
+QueueTable > .datatable--hover { background: $panel; }
+
+/* ---- log pane ------------------------------------------------------------ */
+#log-wrap {
+    height: 40%;
+    display: none;
+}
+#log-wrap.visible { display: block; }
+#log-title {
+    height: 1;
+    padding: 0 1;
+    background: $surface;
+    color: $primary;
+}
+#log-view {
+    height: 1fr;
+    padding: 0 1;
+    background: $background;
+    color: $text-muted;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $background;
+    scrollbar-color: $panel;
+}
+
+/* A one-row grip you can drag to resize the log pane. Doubles as the divider,
+   so there is exactly one rule between the panes rather than two. */
+#splitter {
+    height: 1;
+    background: $background;
+    color: $panel;
+    display: none;
+}
+#splitter.visible { display: block; }
+#splitter:hover {
+    color: $primary;
+}
+
+/* ---- modals -------------------------------------------------------------- */
+AddScreen, ConfirmScreen {
+    align: center middle;
+}
+#add-box, #confirm-box {
+    width: 64;
+    height: auto;
+    /* Cap and scroll: five bordered inputs plus a button row overflow a 24-row
+       terminal, which puts the confirm button off-screen and unreachable. */
+    max-height: 90%;
+    overflow-y: auto;
+    padding: 1 2;
+    background: $surface;
+    border: round $primary;
+}
+/* Borderless fields: each border costs two rows, and the label already tells you
+   where the field is. Keeps the whole dialog inside a small terminal. */
+#add-box Input {
+    height: 1;
+    border: none;
+    padding: 0 1;
+    margin: 0;
+    background: $panel;
+    color: $foreground;
+}
+#add-box Input:focus { background: $primary 20%; }
+/* A Select is a compound widget: the value lives in an inner SelectCurrent. Setting
+   height on the outer one alone squeezes the inner out of view, so the field renders
+   blank however you set it. Both have to be collapsed together. */
+#add-box Select {
+    height: 1;
+    border: none;
+    margin: 0;
+    background: $panel;
+}
+#add-box Select SelectCurrent {
+    height: 1;
+    border: none;
+    padding: 0 1;
+    background: $panel;
+    color: $foreground;
+}
+#add-box Select:focus SelectCurrent { background: $primary 20%; }
+/* The dropdown itself is on the overlay layer, so it may be as tall as it likes. */
+#add-box Select SelectOverlay {
+    max-height: 12;
+    border: round $primary;
+    background: $surface;
+}
+#add-box Checkbox {
+    height: 1;
+    border: none;
+    margin: 1 0 0 0;
+    padding: 0;
+    background: $surface;
+}
+#add-title, #confirm-title {
+    text-style: bold;
+    color: $primary;
+    padding-bottom: 1;
+}
+/* No blank row between groups: six label+field pairs plus a title and buttons has
+   to fit a 24-row terminal without scrolling, and the filled field backgrounds
+   already separate one group from the next.
+   Note margin, not padding — with height:1 a padding-top pushes the text out of its
+   own box and the label vanishes.
+   height:1 also means every .field-label must stay on ONE line at this dialog's
+   width — a label that wraps loses its second row with no visible sign. */
+#add-box .field-label, #confirm-box .field-label {
+    color: $text-muted;
+    height: 1;
+    margin: 0;
+    padding: 0;
+}
+.btn-row Button {
+    height: 1;
+    border: none;
+    padding: 0 2;
+    margin-left: 1;
+    background: $panel;
+    color: $foreground;
+}
+.btn-row Button.-primary, .btn-row Button:focus {
+    background: $primary;
+    color: $background;
+    text-style: bold;
+}
+.btn-row Button.-error {
+    background: $error;
+    color: $background;
+    text-style: bold;
+}
+#confirm-detail {
+    padding: 1 0;
+    color: $foreground;
+}
+.btn-row {
+    height: auto;
+    align-horizontal: right;
+    padding-top: 1;
+}
+
+/* ---- context menu (right-click) ------------------------------------------ */
+ContextMenu {
+    layer: overlay;
+    width: 28;
+    height: auto;
+    background: $surface;
+    border: round $primary;
+    padding: 0;
+}
+ContextMenu Button {
+    width: 100%;
+    height: 1;
+    border: none;
+    background: $surface;
+    color: $foreground;
+    text-align: left;
+    padding: 0 1;
+}
+ContextMenu Button:hover { background: $primary 30%; }
+ContextMenu Button.-danger { color: $error; }
+ContextMenu Button.-danger:hover { background: $error 30%; color: $foreground; }

@@ -1,6 +1,8 @@
 # Manually added
 data/
 tmp/
+Project_notes.txt
+.vscode/
 
 # Juypter
 .jupyter_ystore.db
