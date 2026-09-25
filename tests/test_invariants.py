@@ -11,12 +11,14 @@ Numbering follows HANDOFF.md §4 exactly. Do not renumber.
 from __future__ import annotations
 
 import os
+import re
 import signal
 import time
 
 import pytest
 
 from model_launcher.core.model import is_queue_flag as py_is_queue_flag
+from model_launcher.core.remote import remote_dir
 
 from .conftest import bash_eval
 
@@ -339,6 +341,48 @@ def test_inv09_retry_clears_the_stored_verdict(scheduler):
 
     scheduler.ctl("retry", "eos_x", check=True)
     assert scheduler.dump().find("eos_x").status == "pending"
+
+
+def test_inv09_a_running_driver_honours_retry(scheduler):
+    """`retry` must reach a LIVE driver, not just a fresh ctl process.
+
+    The driver reloads the store every tick in one long-lived bash process, so
+    a reload that fails to forget a deleted row keeps the old verdict alive in
+    memory. On bash 5 this passes either way; see the next test for bash 4.2.
+    """
+    scheduler.write_queue("eos_x ersilia testlib")
+    scheduler.write_status(["eos_x|ersilia|testlib\tmissing-files\t0\t0\t-\t-\t-\t-"])
+    scheduler.start_driver()
+    scheduler.wait_for_driver_info()
+
+    scheduler.ctl("retry", "eos_x", check=True)
+    scheduler.wait_for_status("eos_x", "running")
+
+
+def test_inv09_status_load_resets_its_arrays_portably():
+    """bash 4.2 (the AWS head node) ignores `declare -gA X=()` on an existing X.
+
+    The test suite runs a newer bash, where that line alone does empty the
+    array, so the behavioural test above cannot catch a regression here. Guard
+    the source instead: every array status_load re-declares must be unset first.
+    """
+    lib = (remote_dir() / "scheduler-lib.sh").read_text()
+    body = lib[lib.index("status_load() {") :]
+    lines = [
+        line.strip()
+        for line in body[: body.index("\n}\n")].splitlines()
+        if not line.strip().startswith("#")
+    ]
+    declare_at = next(i for i, line in enumerate(lines) if "declare -gA" in line)
+    names = re.findall(r"(\w+)=\(\)", lines[declare_at])
+    unset_names = {
+        word
+        for line in lines[:declare_at]
+        if line.startswith("unset ")
+        for word in line.split()[1:]
+    }
+    missing = [name for name in names if name not in unset_names]
+    assert not missing, f"status_load re-declares without unsetting first: {missing}"
 
 
 def test_inv09_empty_log_column_does_not_swallow_the_note(scheduler):

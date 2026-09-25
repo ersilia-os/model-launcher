@@ -67,6 +67,7 @@ DEST=/shared/scripts/scheduler
 grep -c 'flock -n 8' "$DEST/run-model-queue.sh"                 # 1
 grep -c log_submitted_ids "$DEST/scheduler-service.sh"          # 1
 grep -c audit_log "$DEST/sched-ctl.sh"                          # 15
+grep -c 'unset ST_STATUS' "$DEST/scheduler-lib.sh"              # 1
 ```
 
 ### 2. Configure (first time only)

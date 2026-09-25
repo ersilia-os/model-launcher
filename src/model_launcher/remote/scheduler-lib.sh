@@ -345,6 +345,14 @@ status_file() { echo "${STATUS_FILE:-${LOG_DIR}/status.tsv}"; }
 
 # Populate ST_STATUS/ST_DONE/ST_TOTAL/ST_START/ST_FIN/ST_LOG/ST_NOTE by key.
 status_load() {
+    # `unset` first, and it is not optional. On bash 4.2 (the AWS head node),
+    # `declare -gA X=()` inside a function does NOT empty an X that already
+    # exists — so the long-running driver never forgot a row deleted from the
+    # file. `retry` looked like it did nothing (the driver kept re-applying the
+    # old verdict from memory), and the next persist_job wrote every cleared row
+    # back to disk. bash 5 empties the array either way, which is why no test
+    # caught it.
+    unset ST_STATUS ST_DONE ST_TOTAL ST_START ST_FIN ST_LOG ST_NOTE
     declare -gA ST_STATUS=() ST_DONE=() ST_TOTAL=() ST_START=() ST_FIN=() ST_LOG=() ST_NOTE=()
     local f; f="$(status_file)"
     [ -f "$f" ] || return 0
