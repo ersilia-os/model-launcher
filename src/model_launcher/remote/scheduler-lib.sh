@@ -342,6 +342,11 @@ status_load() {
         case "$key" in ''|'#'*) continue ;; esac
         ST_STATUS["$key"]="$st"; ST_DONE["$key"]="${dn:-0}"; ST_TOTAL["$key"]="${tt:-0}"
         ST_START["$key"]="${sa:--}"; ST_FIN["$key"]="${fi:--}"
+        # "-" is status_write's placeholder for "no value", not a real value —
+        # translate it back before it reaches anything that checks `-n`. See the
+        # comment on status_write for why the placeholder exists at all.
+        [ "$lg" = "-" ] && lg=""
+        [ "$nt" = "-" ] && nt=""
         ST_LOG["$key"]="${lg:-}";   ST_NOTE["$key"]="${nt:-}"
     done < "$f"
 }
@@ -354,10 +359,19 @@ status_write() {
     {
         printf '#key\tstatus\tdone\ttotal\tstarted\tfinished\tlog\tnote\n'
         for key in "${!ST_STATUS[@]}"; do
+            # LOG and NOTE get the same "-" placeholder STARTED/FINISHED already
+            # use for "no value" — never a bare empty field. `read -r` in
+            # status_load treats a run of tabs as ONE separator (tab is IFS
+            # *whitespace*, even when IFS is set to only a tab), so an empty LOG
+            # column immediately followed by a non-empty NOTE silently collapses
+            # into one field: NOTE's text is read as LOG, and NOTE itself comes
+            # back empty. `reclaim_stale_running` produces exactly that shape —
+            # an empty log, a real note — and the fallout was the note text
+            # becoming a relative filename the driver then wrote a job log to.
             printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                 "$key" "${ST_STATUS[$key]}" "${ST_DONE[$key]:-0}" "${ST_TOTAL[$key]:-0}" \
                 "${ST_START[$key]:--}" "${ST_FIN[$key]:--}" \
-                "${ST_LOG[$key]:-}" "${ST_NOTE[$key]:-}"
+                "${ST_LOG[$key]:--}" "${ST_NOTE[$key]:--}"
         done | sort
     } > "$tmp" && mv -f "$tmp" "$f"
 }
@@ -422,12 +436,36 @@ read_driver_info() {
     return 0
 }
 
-# PID of a running driver process owned by this user, if any.
+# PID of a running driver for THIS $LOG_DIR, if any.
 # Used as a fallback when driver.info is absent — which is exactly the case while a
 # PRE-UPGRADE driver is still running: it never wrote driver.info, and reporting it
 # as stopped would show its in-flight model as a phantom.
+#
+# Scoped by LOG_DIR, not just by uid: everyone on the cluster shares one unix
+# account, so `pgrep -u $(id -u) -f run-model-queue` alone would match ANY
+# instance — a colleague's quick `LOG_DIR=/tmp/schedtest` test run would then
+# make the production scheduler (a different LOG_DIR entirely) look like a
+# legacy pre-upgrade driver. The queue file path is a positional argument and
+# would appear in `pgrep -f`'s match, but LOG_DIR is only ever passed as an
+# environment variable, which does not appear in a process's argv — so the
+# only reliable way to identify "the driver for this LOG_DIR" is to read each
+# candidate's own environment. This requires /proc, hence Linux only, which
+# matches the rest of this codebase (grep -P, stat -c, ...).
 driver_pid_scan() {
-    pgrep -u "$(id -u)" -f 'run-model-queue\.sh' 2>/dev/null | head -n 1
+    local pid want="${LOG_DIR:-}" candidates
+    candidates="$(pgrep -u "$(id -u)" -f 'run-model-queue\.sh' 2>/dev/null)"
+    [ -n "$candidates" ] || return 0
+    if [ -z "$want" ]; then
+        printf '%s\n' "$candidates" | head -n 1
+        return 0
+    fi
+    for pid in $candidates; do
+        if tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null | grep -qxF "LOG_DIR=${want}"; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+    done
+    return 0
 }
 
 # Is a driver actually alive?
@@ -449,10 +487,38 @@ driver_is_legacy() {
 }
 
 # Post a one-shot control message for the driver to consume.
-#   control_post <verb> [payload]
+#   control_post <verb> [payload] [who]
+# `who` is written as a SECOND line, appended after the payload rather than
+# inserted before it — an older sched-ctl.sh that never posted one still
+# writes a file `drain_control`'s `head -n 1` reads correctly; a newer one
+# reading `sed -n 2p` just gets nothing from an old-format file. Additive,
+# like every other on-disk contract in this codebase.
 control_post() {
     local d; d="$(control_dir)"
     mkdir -p "$d"
     local f="${d}/$(date -u +%s%N).$$.$1"
-    printf '%s\n' "${2:-}" > "${f}.tmp" && mv -f "${f}.tmp" "$f"
+    { printf '%s\n' "${2:-}"; printf '%s\n' "${3:-}"; } > "${f}.tmp" && mv -f "${f}.tmp" "$f"
+}
+
+# =============================================================================
+# Attribution
+# =============================================================================
+# Everyone on the cluster shares one unix account, so `$(id -un)` identifies
+# nothing about who actually ran a command. WHO is instead passed in from
+# outside — normally by the Python client, which reads it from the OPERATOR'S
+# OWN machine, where a personal account genuinely does mean something. A raw
+# `sched-ctl.sh` invocation with no --who falls back to `id -un`, which will
+# usually just say the shared account's name; that is an honest "unknown", not
+# a wrong answer.
+
+# Append one line to the audit trail: timestamp, who, and the command as run.
+# Called for every MUTATING command, never for a read (list/status/dump).
+# A plain `>>` append is fine here — lines are short, so under PIPE_BUF, and a
+# log is allowed to interleave imperfectly under true concurrency in a way a
+# state file is not.
+audit_log() {  # $1 = who, $2 = verb, remaining = its args
+    local who="$1" verb="$2"; shift 2
+    mkdir -p "$LOG_DIR"
+    printf '%s\t%s\t%s\t%s\n' "$(now_iso)" "${who:-unknown}" "$verb" "$*" \
+        >> "${LOG_DIR}/audit.log"
 }

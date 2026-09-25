@@ -2,7 +2,7 @@
 #SBATCH --job-name=ersilia-wave
 #SBATCH --partition=cpu-queue
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=10
+#SBATCH --cpus-per-task=8
 #SBATCH --time=24:00:00
 #SBATCH --output=/shared/logs/ersilia-wave-%A_%a.out
 #SBATCH --error=/shared/logs/ersilia-wave-%A_%a.err
@@ -14,12 +14,17 @@
 #   1. S3_BUCKET is DEFAULTED (the generated worker silently skips the S3 upload when
 #      $S3_BUCKET is empty, e.g. a job that did not inherit the login environment).
 #   2. Longer wall time (24:00:00) — a 100k-molecule chunk is 10x the old 10k chunk.
-#   3. cpus-per-task=10 caps packing at ~3 jobs per 32-vCPU node (cpu-queue is CR_CPU
+#   3. cpus-per-task=8 caps packing at 4 jobs per 32-vCPU node (cpu-queue is CR_CPU
 #      = no memory accounting, so cpus-per-task is the only lever to prevent OOM from
-#      overpacking). 32 / 10 = 3 jobs/node, each with ~1/3 of node RAM.
+#      overpacking). 32 / 8 = 4 jobs/node, each with 1/4 of node RAM.
+#      This repo previously said 10 while the deployed cluster ran 8 — a drift that
+#      went unnoticed because nothing diffed the two. 8 is the value that has
+#      actually been running in production; this file now matches it, so
+#      deploying it is a no-op for packing rather than a silent 25% throughput
+#      change (32/10 ≈ 3 jobs/node vs 32/8 = 4).
 #      NOTE: assumes SLURM sees 32 CPUs/node. Verify with
 #        sudo /opt/slurm/bin/scontrol show node <node> | grep -oP 'CPUTot=\K\d+'
-#      If CPUTot=16 (hyperthreads not counted), use cpus-per-task=5 for 3 jobs/node.
+#      If CPUTot=16 (hyperthreads not counted), use cpus-per-task=4 for 4 jobs/node.
 #
 # Called (per wave) as:
 #   sbatch --array=0-(W-1) run-ersilia-wave-job.sh <model_id> <wave_chunk_list> <output_dir>

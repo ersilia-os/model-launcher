@@ -14,33 +14,42 @@ from rich.text import Text
 
 from ...branding import console
 from ...core.model import parse_dump
-from ...core.runner import RunnerError, build_runner
+from ...core.runner import RunnerError
 from ..render import counts_text, snapshot_table, summary_table
+from ..target import resolve_target
 
 
 @click.command(cls=RichCommand)
 @click.pass_context
 def check(ctx):
     """Verify the transport and print one snapshot summary, then exit."""
-    runner = build_runner(**ctx.obj)
+    target = resolve_target(ctx.obj)
+    runner = target.runner
     out = console()
     err = console(stderr=True)
 
     facts = summary_table()
     facts.add_row("transport", Text(runner.location, style="key"))
     facts.add_row("ctl", Text(runner.ctl, style="muted"))
+    facts.add_row("log dir", Text(runner.log_dir or "(ctl default)", style="muted"))
+    if target.source:
+        facts.add_row("found", Text(target.source, style="muted"))
 
     try:
         text = runner.dump()
     except RunnerError as exc:
         out.print(facts)
         err.print(f"[bad]FAILED[/bad] {exc}")
+        if target.hint:
+            err.print(f"       {target.hint}")
         sys.exit(1)
 
     snap = parse_dump(text)
     if snap.error:
         out.print(facts)
         err.print(f"[bad]FAILED[/bad] {snap.error}")
+        if target.hint:
+            err.print(f"       {target.hint}")
         sys.exit(1)
 
     state = Text(snap.driver_state, style="live" if snap.driver_alive else "warn")

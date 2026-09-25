@@ -120,6 +120,27 @@ def test_inv03_paused_flag_survives_startup(scheduler):
     assert scheduler.dump().find("eos_x").status == "pending"
 
 
+def test_inv03_a_command_posted_the_instant_driver_info_appears_is_never_discarded(
+    scheduler,
+):
+    """``discard_stale_control`` must finish before ``driver.info`` exists.
+
+    ``driver.info`` is the readiness signal an external client polls for. If
+    the driver announced itself before running its own stale-message sweep,
+    there would be a real window — not just a theoretical one — where a fast
+    client sees a ready driver, posts a command, and then has that exact
+    command discarded a moment later as if it predated startup. This starts
+    the driver and posts the instant ``wait_for_driver_info`` returns, with no
+    slack — a race would show up as a straight failure here, not a flake.
+    """
+    scheduler.write_queue("# empty\n")
+    scheduler.start_driver()
+    scheduler.wait_for_driver_info()
+
+    scheduler.ctl("stop-after-current", check=True)
+    assert scheduler.dump().stop_after_current is True
+
+
 # --- 4. kill the orchestrator BEFORE scancel --------------------------------
 
 
@@ -320,35 +341,40 @@ def test_inv09_retry_clears_the_stored_verdict(scheduler):
     assert scheduler.dump().find("eos_x").status == "pending"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="status_load uses IFS=$'\\t', and tab is IFS *whitespace*: a run of "
-    "tabs collapses to one separator and trailing tabs vanish. A row with an "
-    "empty log but a non-empty note therefore reads note-as-log. Fix in M1 by "
-    "writing '-' for empty fields, as started/finished already do.",
-)
 def test_inv09_empty_log_column_does_not_swallow_the_note(scheduler):
     """A stored note must not shift left into the log-path column.
 
     This is not cosmetic. ``merge_status`` assigns ``Q_LOG[i]`` from the stored
-    log path, and the driver appends orchestrator output to it — so the job log
-    becomes a *relative* file named after the note text, created in whatever
-    directory the driver happens to be running in. The real log is lost and the
-    dashboard's "open log" points at nothing.
+    log path, and the driver appends orchestrator output to it — so a shifted
+    note would become a *relative* file named after its own text, created in
+    whatever directory the driver happens to be running in. The real log is
+    lost and the dashboard's "open log" points at nothing.
 
-    `reclaim_stale_running` produces exactly this shape: empty log, non-empty
-    note. Note the Python parser in ``model.py`` splits tabs correctly, so the
-    damage is invisible from the dashboard — only the driver misbehaves.
+    ``reclaim_stale_running`` produces exactly this shape: empty log,
+    non-empty note. Fixed by having ``status_write`` emit ``-`` for both
+    columns when empty — the same placeholder ``started``/``finished`` already
+    use — so a genuinely empty field is never adjacent to a non-empty one on
+    the wire (bash's ``read`` collapses runs of tab-separated empty fields,
+    since tab is IFS *whitespace* even when IFS is set to only a tab).
+    ``status_load`` and the Python parser both translate ``-`` back to ``""``
+    for these two columns, so nothing downstream ever sees the placeholder.
+
+    This writes the row exactly as the fixed ``status_write`` would, rather
+    than the old ambiguous shape (an empty field with no placeholder) — that
+    shape is genuinely unparseable in bash regardless of the read side, so the
+    guarantee is "writes are never ambiguous", not "any input can be recovered".
     """
     note = "reclaimed at startup"
-    scheduler.write_status([f"eos_x|ersilia|testlib\tpending\t0\t100\t-\t-\t\t{note}"])
+    scheduler.write_status([f"eos_x|ersilia|testlib\tpending\t0\t100\t-\t-\t-\t{note}"])
     scheduler.write_queue("eos_x ersilia testlib")
 
     scheduler.start_driver()
     scheduler.wait_for_status("eos_x", "running")
 
-    stray = scheduler.root / note
-    assert not stray.exists(), f"driver wrote the job log to {stray}"
+    stray_note = scheduler.root / note
+    stray_dash = scheduler.root / "-"
+    assert not stray_note.exists(), f"driver wrote the job log to {stray_note}"
+    assert not stray_dash.exists(), "the '-' placeholder leaked into the log path"
     assert (scheduler.log_dir / "eos_x_testlib.log").exists()
 
 

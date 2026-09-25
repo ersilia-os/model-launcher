@@ -69,14 +69,36 @@ done
 QUEUE_FILE="${POS[0]:-}"
 DEFAULT_LIBRARY="${POS[1]:-}"
 DEFAULT_WAVE_SIZE="${POS[2]:-1000}"
-DEFAULT_QUEUE="${POS[3]:-cpu-queue}"
+
+# ---- locate this script's own directory ----
+# scheduler.conf and scheduler-lib.sh both live beside it, and the conf has to
+# be sourced before ANY ${VAR:-default} below fixes a value it was meant to
+# override — hence computing this before the env/config block, not after it.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---- scheduler.conf: per-machine defaults ----
+# A DEFAULTS file, not an assignment file — see scheduler.conf.example.
+# Precedence, high to low: CLI flag/positional > environment > this file >
+# the built-in default hardcoded below.
+SCHEDULER_CONF="${SCHEDULER_CONF:-${SCRIPT_DIR}/scheduler.conf}"
+# shellcheck source=/dev/null
+[ -f "$SCHEDULER_CONF" ] && source "$SCHEDULER_CONF"
+
+DEFAULT_QUEUE="${POS[3]:-${DEFAULT_QUEUE:-cpu-queue}}"
 
 # ---- env / config ----
 S3_BUCKET="${S3_BUCKET:-ai2050-ersilia-cluster}"
 POLL_SECONDS="${POLL_SECONDS:-30}"
 ON_FAIL="${ON_FAIL:-continue}"
 AUTO_FETCH_SIF="${AUTO_FETCH_SIF:-0}"
+SIF_DIR="${SIF_DIR:-/shared/sif-files}"
+DOWNLOAD_SCRIPT="${DOWNLOAD_SCRIPT:-/shared/scripts/download-ersilia-model.sh}"
 LOG_DIR="${LOG_DIR:-/shared/logs/scheduler}"
+# Exported (not just set) so a driver started with no explicit LOG_DIR still
+# carries its resolved value in its own environment — driver_pid_scan reads
+# this back from /proc to tell "our" driver apart from one against a
+# different LOG_DIR, and can only do that if it is actually there to read.
+export LOG_DIR
 STATE_FILE="${STATE_FILE:-${LOG_DIR}/state.tsv}"
 STATUS_FILE="${STATUS_FILE:-${LOG_DIR}/status.tsv}"
 CTL_POLL="${CTL_POLL:-15}"
@@ -89,15 +111,17 @@ if [ -z "$QUEUE_FILE" ]; then usage; exit 1; fi
 [ -f "$QUEUE_FILE" ] || { echo "ERROR: queue file not found: $QUEUE_FILE"; exit 1; }
 QUEUE_FILE="$(cd "$(dirname "$QUEUE_FILE")" && pwd)/$(basename "$QUEUE_FILE")"
 
-# ---- locate + source the shared lib ----
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ---- source the shared lib ----
 LIB="${SCRIPT_DIR}/scheduler-lib.sh"
-[ -f "$LIB" ] || LIB="/shared/scripts/large_library_scripts/scheduler/scheduler-lib.sh"
+[ -f "$LIB" ] || LIB="/shared/scripts/scheduler/scheduler-lib.sh"
 # shellcheck source=/dev/null
 source "$LIB" || { echo "ERROR: cannot source scheduler-lib.sh ($LIB)"; exit 1; }
 
 # ---- library-aliases (resolve_library); passthrough if not deployed ----
-for cand in /shared/scripts/library-aliases.sh \
+# The packaged copy beside this script is checked first; the /shared paths are
+# kept for a deployment that predates the scripts moving into this package.
+for cand in "${SCRIPT_DIR}/library-aliases.sh" \
+            /shared/scripts/library-aliases.sh \
             "${SCRIPT_DIR}/../../AWS_templates/library-aliases.sh" \
             /shared/scripts/AWS_templates/library-aliases.sh; do
     # shellcheck source=/dev/null
@@ -107,9 +131,13 @@ if ! declare -F resolve_library >/dev/null; then
     resolve_library() { echo "$1"; }   # no alias table -> pass names through unchanged
 fi
 
-# ---- locate the wave orchestrators (one dir up; /shared fallback) ----
-WAVES_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-[ -f "${WAVES_DIR}/submit-ersilia-waves.sh" ] || WAVES_DIR="/shared/scripts/large_library_scripts"
+# ---- locate the wave orchestrators ----
+# Packaged layout puts them at slurm/ beside this script. A deployment that
+# predates the move (or a nonstandard layout via scheduler.conf's WAVES_DIR)
+# falls back to the old one-directory-up location, then the /shared default.
+WAVES_DIR="${WAVES_DIR:-${SCRIPT_DIR}/slurm}"
+[ -f "${WAVES_DIR}/submit-ersilia-waves.sh" ] || WAVES_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+[ -f "${WAVES_DIR}/submit-ersilia-waves.sh" ] || WAVES_DIR="/shared/scripts/scheduler/slurm"
 
 mkdir -p "$LOG_DIR" "$(control_dir)"
 
@@ -150,6 +178,7 @@ Q_STATUS=(); Q_DONE=(); Q_TOTAL=(); Q_START=(); Q_FIN=(); Q_LOG=(); Q_NOTE=()
 
 # ---- control state ----
 CANCEL_KEYS=""          # space-separated keys with a pending cancel request
+declare -A CANCEL_WHO=()  # want-token (key or model) -> operator who asked, if known
 STOP_AFTER=0            # finish the current job, then exit
 SHUTDOWN=0              # exit as soon as the current job settles
 
@@ -168,7 +197,7 @@ add_job() {  # model mode library wave queue hold status note [cpus]
     Q_MODEL[i]="$1"; Q_MODE[i]="$2"; Q_LIB[i]="$3"; Q_WAVE[i]="$4"; Q_QUEUE[i]="$5"
     Q_HOLD[i]="$6"; Q_STATUS[i]="$7"; Q_NOTE[i]="$8"
     # Empty means "no override": the worker's own #SBATCH --cpus-per-task stands.
-    # That default differs per mode (ersilia 10, singularity 4) and the deployed
+    # That default differs per mode (ersilia 8, singularity 4) and the deployed
     # copies have been re-tuned by hand, so the driver must not invent a number.
     Q_CPUS[i]="${9:-}"
     Q_KEY[i]="$(job_key "$1" "$2" "$3")"
@@ -307,7 +336,7 @@ set_status() {  # $1=index $2=status [$3=note]
 # Consume every pending control message and update the flags. Cheap enough to
 # call on each poll tick.
 drain_control() {
-    local d f verb payload
+    local d f verb payload who
     d="$(control_dir)"
     [ -d "$d" ] || return 0
 
@@ -317,20 +346,25 @@ drain_control() {
     for f in "$d"/*.cancel "$d"/*.shutdown "$d"/*.refresh; do
         [ -f "$f" ] || continue
         verb="${f##*.}"
-        payload="$(head -n 1 "$f" 2>/dev/null)"
+        # `who` is a second line, appended after the payload by newer clients.
+        # An older message simply has nothing on line 2, which reads as empty
+        # here — additive, not a format break.
+        payload="$(sed -n '1p' "$f" 2>/dev/null)"
+        who="$(sed -n '2p' "$f" 2>/dev/null)"
         rm -f "$f"
         case "$verb" in
             cancel)
                 CANCEL_KEYS="${CANCEL_KEYS} ${payload}"
-                log_line "control: cancel requested for '${payload}'"
+                [ -n "$who" ] && CANCEL_WHO["$payload"]="$who"
+                log_line "control: cancel requested for '${payload}'${who:+ by ${who}}"
                 ;;
             shutdown)
                 SHUTDOWN=1
-                log_line "control: shutdown requested"
+                log_line "control: shutdown requested${who:+ by ${who}}"
                 ;;
             refresh)
                 FORCE_REFRESH=1
-                log_line "control: S3 recount requested"
+                log_line "control: S3 recount requested${who:+ by ${who}}"
                 ;;
         esac
     done
@@ -392,6 +426,17 @@ cancel_clear() {  # $1 = key — drop satisfied requests
         keep="${keep} ${want}"
     done
     CANCEL_KEYS="$keep"
+    unset "CANCEL_WHO[$key]" "CANCEL_WHO[$model]" 2>/dev/null
+}
+
+# Who asked for this job's cancellation, if the request said. Matches the same
+# two forms cancel_wanted/cancel_clear do (full key or bare model id). Empty
+# for a SHUTDOWN-triggered cancellation, which never named a job specifically.
+cancel_who() {  # $1 = key
+    local key="$1" model="${1%%|*}"
+    [ -n "${CANCEL_WHO[$key]:-}" ] && { printf '%s' "${CANCEL_WHO[$key]}"; return 0; }
+    [ -n "${CANCEL_WHO[$model]:-}" ] && { printf '%s' "${CANCEL_WHO[$model]}"; return 0; }
+    return 1
 }
 
 # =============================================================================
@@ -400,13 +445,13 @@ cancel_clear() {  # $1 = key — drop satisfied requests
 
 ensure_sif() {  # $1=model $2=logfile ; 0 if present (or fetched), 1 otherwise
     local m="$1" logf="$2"
-    [ -f "/shared/sif-files/${m}.sif" ] && return 0
+    [ -f "${SIF_DIR}/${m}.sif" ] && return 0
     if [ "$AUTO_FETCH_SIF" = "1" ]; then
-        if [ -x /shared/scripts/download-ersilia-model.sh ]; then
-            /shared/scripts/download-ersilia-model.sh "$m" >>"$logf" 2>&1 && return 0
+        if [ -x "$DOWNLOAD_SCRIPT" ]; then
+            "$DOWNLOAD_SCRIPT" "$m" >>"$logf" 2>&1 && return 0
         else
             aws s3 cp "s3://${S3_BUCKET}/sif-files/${m}.sif" \
-                "/shared/sif-files/${m}.sif" >>"$logf" 2>&1 && return 0
+                "${SIF_DIR}/${m}.sif" >>"$logf" 2>&1 && return 0
         fi
     fi
     return 1
@@ -489,7 +534,7 @@ run_job() {  # $1 = index
     local model="${Q_MODEL[i]}" mode="${Q_MODE[i]}" lib="${Q_LIB[i]}"
     local wave="${Q_WAVE[i]}" queue="${Q_QUEUE[i]}" key="${Q_KEY[i]}"
     local cpus="${Q_CPUS[i]:-}"
-    local script rc cancelled=0 last_refresh=0 nowsec
+    local script rc cancelled=0 last_refresh=0 nowsec cancelled_by=""
 
     log_line "----- ${model} (${mode}) on ${lib}  [queue pos $((i + 1))/${#Q_MODEL[@]}]${cpus:+  cpus=${cpus}} -----"
 
@@ -507,14 +552,14 @@ run_job() {  # $1 = index
     set_status "$i" running ""
 
     # pre-flight: SIF present (no download unless AUTO_FETCH_SIF=1).
-    # Skipped under --dry-run: a dry run must not depend on /shared/sif-files, so the
+    # Skipped under --dry-run: a dry run must not depend on $SIF_DIR, so the
     # dispatch/poll/cancel path stays testable off-cluster.
     if [ "$DRY_RUN" -eq 1 ]; then
         log_line "  [dry-run] skipping SIF pre-flight for ${model}"
     elif ! ensure_sif "$model" "${Q_LOG[i]}"; then
         Q_FIN[i]="$(now_iso)"
-        set_status "$i" missing-files "SIF not found: /shared/sif-files/${model}.sif"
-        log_line "  SIF not found: /shared/sif-files/${model}.sif — missing-files, continuing"
+        set_status "$i" missing-files "SIF not found: ${SIF_DIR}/${model}.sif"
+        log_line "  SIF not found: ${SIF_DIR}/${model}.sif — missing-files, continuing"
         return 0
     fi
     # pre-flight: input library must have chunks in S3
@@ -556,6 +601,7 @@ run_job() {  # $1 = index
         drain_control
         if [ "$SHUTDOWN" -eq 1 ] || cancel_wanted "$key"; then
             cancelled=1
+            cancelled_by="$(cancel_who "$key" 2>/dev/null || true)"
             cancel_child "${Q_LOG[i]}"
             cancel_clear "$key"
             break
@@ -578,8 +624,9 @@ run_job() {  # $1 = index
     Q_DONE[i]="$(s3_count_output "$model" "$lib" "$mode")"
 
     if [ "$cancelled" -eq 1 ]; then
-        set_status "$i" cancelled "cancelled by request at ${Q_FIN[i]}"
-        log_line "  CANCELLED (${Q_DONE[i]}/${Q_TOTAL[i]})"
+        set_status "$i" cancelled \
+            "cancelled${cancelled_by:+ by ${cancelled_by}} at ${Q_FIN[i]}"
+        log_line "  CANCELLED (${Q_DONE[i]}/${Q_TOTAL[i]})${cancelled_by:+ — requested by ${cancelled_by}}"
         return 130
     fi
     if [ "$rc" -eq 0 ]; then
@@ -622,7 +669,44 @@ summary() {
     echo "=========================================="
 }
 
+RC=0
+FAILS=0
+IDLE_ANNOUNCED=0
+
+# A SIGKILLed driver cannot run its trap, so an orchestrator can still be orphaned.
+# Starting a second model alongside it is the worst outcome, so say so loudly — the
+# operator can then kill it, or let it finish before resuming.
+warn_orphan_orchestrators() {
+    local pids
+    pids="$(pgrep -u "$(id -u)" -f 'submit-(ersilia|singularity)-waves\.sh' 2>/dev/null | tr '\n' ' ')"
+    [ -n "$pids" ] || return 0
+    echo "=========================================="
+    echo "WARNING: a wave orchestrator is ALREADY RUNNING (pid(s): ${pids})"
+    echo "  A previous driver was killed without cleaning up, or someone started one"
+    echo "  by hand. If you let this driver proceed, TWO models will run at once and"
+    echo "  fight over nodes and /fsx."
+    echo "  To stop the stray one:  kill ${pids}"
+    echo "  Then check for its SLURM jobs:  squeue -u \$USER"
+    echo "=========================================="
+}
+warn_orphan_orchestrators
+
+# Startup reconciliation, in this order: throw away messages meant for the dead
+# driver, THEN adopt the jobs it left behind. Reversed, a stale `cancel` naming a
+# just-reclaimed job would cancel it on the first tick.
+discard_stale_control
+reclaim_stale_running
+
 # ---- announce ourselves so sched-ctl.sh / the TUI can find this instance ----
+#
+# This MUST be the last thing that happens before the main loop, not the first.
+# driver.info is the signal an external client polls for "the driver is up, go
+# ahead and post a command" — write it any earlier and there is a real window,
+# not just a theoretical one, where a client sees a ready driver, posts (say)
+# `stop-after-current`, and then discard_stale_control — which has not run yet
+# from this driver's own perspective — throws it away as if it predated
+# startup. A client fast enough to act within a few bash statements of
+# driver.info appearing hits this reliably, not just occasionally.
 write_driver_info <<EOF
 pid=$$
 queue_file=$QUEUE_FILE
@@ -651,34 +735,6 @@ echo "  State file : $STATE_FILE"
 echo "  Control    : ${SCRIPT_DIR}/sched-ctl.sh   (add / rm / top / hold / cancel / pause)"
 echo "  Idle mode  : $([ "$EXIT_WHEN_EMPTY" = "1" ] && echo 'exit when queue empty' || echo 'stay up and wait for queue changes')"
 echo "=========================================="
-
-RC=0
-FAILS=0
-IDLE_ANNOUNCED=0
-
-# A SIGKILLed driver cannot run its trap, so an orchestrator can still be orphaned.
-# Starting a second model alongside it is the worst outcome, so say so loudly — the
-# operator can then kill it, or let it finish before resuming.
-warn_orphan_orchestrators() {
-    local pids
-    pids="$(pgrep -u "$(id -u)" -f 'submit-(ersilia|singularity)-waves\.sh' 2>/dev/null | tr '\n' ' ')"
-    [ -n "$pids" ] || return 0
-    echo "=========================================="
-    echo "WARNING: a wave orchestrator is ALREADY RUNNING (pid(s): ${pids})"
-    echo "  A previous driver was killed without cleaning up, or someone started one"
-    echo "  by hand. If you let this driver proceed, TWO models will run at once and"
-    echo "  fight over nodes and /fsx."
-    echo "  To stop the stray one:  kill ${pids}"
-    echo "  Then check for its SLURM jobs:  squeue -u \$USER"
-    echo "=========================================="
-}
-warn_orphan_orchestrators
-
-# Startup reconciliation, in this order: throw away messages meant for the dead
-# driver, THEN adopt the jobs it left behind. Reversed, a stale `cancel` naming a
-# just-reclaimed job would cancel it on the first tick.
-discard_stale_control
-reclaim_stale_running
 
 while :; do
     drain_control

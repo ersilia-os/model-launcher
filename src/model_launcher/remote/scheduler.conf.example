@@ -1,0 +1,52 @@
+#!/bin/bash
+# =============================================================================
+# Per-machine defaults for the scheduler.
+# =============================================================================
+# Copy this file to `scheduler.conf` next to sched-ctl.sh and run-model-queue.sh
+# on the target machine, then edit the values for that machine. Everything here
+# is optional — a fresh checkout with no scheduler.conf at all runs with the
+# built-in defaults below, unchanged from before this file existed.
+#
+# THIS IS A DEFAULTS FILE, NOT AN ASSIGNMENT FILE. Every line must be written
+# as `VAR="${VAR:-value}"`, exactly like the built-in defaults it is overriding
+# — never `VAR=value`. A plain assignment here would silently win over an
+# explicit `--log-dir` flag or a `LOG_DIR=...` set in the environment, which
+# would break both normal command-line use and the test harness (which points
+# LOG_DIR at a throwaway directory for every test run).
+#
+# Precedence, high to low:  CLI flag  >  environment  >  scheduler.conf  >
+# the built-in default hardcoded in the scripts.
+#
+# This file is sourced by both sched-ctl.sh and run-model-queue.sh, early,
+# before either of them fixes any of these values — so it applies equally to
+# every command and to the driver.
+# =============================================================================
+
+# Where the scheduler keeps its state: the queue lock, status.tsv, driver.info,
+# per-job logs. One LOG_DIR is one scheduler instance.
+# LOG_DIR="${LOG_DIR:-/shared/logs/scheduler}"
+
+# S3 bucket holding input chunks and output results.
+# S3_BUCKET="${S3_BUCKET:-ai2050-ersilia-cluster}"
+
+# Directory holding the Singularity/Apptainer .sif image for each model,
+# named <model_id>.sif. Checked before every ersilia-mode dispatch.
+# SIF_DIR="${SIF_DIR:-/shared/sif-files}"
+
+# Default SLURM partition when a queue line doesn't name one.
+# DEFAULT_QUEUE="${DEFAULT_QUEUE:-cpu-queue}"
+
+# Ceiling for a per-job `cpus=N` override. Set this to the vCPU count of the
+# partition's instance type — a value the code cannot know on its own.
+# MAX_CPUS_PER_TASK="${MAX_CPUS_PER_TASK:-32}"
+
+# How this machine runs models: `slurm` (sbatch wave orchestrators, the AWS
+# cluster) or `serve` (ersilia serve/run, a plain remote computer with no
+# scheduler). Published in `dump`'s runtime section so a client can tell the
+# two apart; only `slurm` is implemented as of this file's version.
+# DISPATCH="${DISPATCH:-slurm}"
+
+# Where the wave orchestrators (submit-ersilia-waves.sh, etc.) live, if not
+# in the packaged `slurm/` directory beside this script. Set this only for a
+# nonstandard layout.
+# WAVES_DIR="${WAVES_DIR:-}"

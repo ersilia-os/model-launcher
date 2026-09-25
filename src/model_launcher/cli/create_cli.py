@@ -61,13 +61,15 @@ def _list_hosts(ctx, _param, value):
 @click.option(
     "--ctl",
     default=None,
-    help="Path to sched-ctl.sh on the target (default: $SCHEDULER_CTL, else the "
-    "deployed copy, else the one packaged with this client).",
+    help="Path to sched-ctl.sh on the target (default: $SCHEDULER_CTL; over SSH, "
+    "the copy the running driver uses; locally, the deployed copy, else the one "
+    "packaged with this client).",
 )
 @click.option(
     "--log-dir",
     default=None,
-    help="Scheduler LOG_DIR to inspect (default: $LOG_DIR, else the ctl default).",
+    help="Scheduler LOG_DIR to inspect (default: $LOG_DIR; over SSH, the running "
+    "driver's; else the ctl default).",
 )
 @click.option(
     "--queue-file",
@@ -82,8 +84,14 @@ def _list_hosts(ctx, _param, value):
     help="Extra argument for ssh; repeat once per word, e.g. "
     "--ssh-opt -p --ssh-opt 2222.",
 )
+@click.option(
+    "--who",
+    default=None,
+    help="Your name, recorded on the target's audit log and cancellation notes "
+    "(default: $SCHEDULER_WHO, else your local username).",
+)
 @click.pass_context
-def cli(ctx, host, ctl, log_dir, queue_file, s3_bucket, ssh_opt):
+def cli(ctx, host, ctl, log_dir, queue_file, s3_bucket, ssh_opt, who):
     """Launch and steer Ersilia models over large chemical libraries.
 
     With no subcommand, opens the dashboard.
@@ -96,6 +104,7 @@ def cli(ctx, host, ctl, log_dir, queue_file, s3_bucket, ssh_opt):
         queue_file=queue_file,
         s3_bucket=s3_bucket,
         ssh_opts=list(ssh_opt),
+        who=who,
     )
     if ctx.invoked_subcommand is None:
         ctx.invoke(tui)

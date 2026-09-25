@@ -164,7 +164,14 @@ class Scheduler:
         return parse_dump(proc.stdout)
 
     def start_driver(self, *extra: str, **env: str) -> subprocess.Popen:
-        """Start the driver in dry-run and return the process."""
+        """Start the driver in dry-run and return the process.
+
+        Combined stdout/stderr goes to ``driver.log`` in ``log_dir``, matching
+        the ``tee -a $LOG_DIR/driver.log`` a real deployment uses — a test can
+        grep it with :meth:`driver_log` rather than draining a live pipe
+        (which would deadlock the driver once it wrote past the OS pipe
+        buffer, since nothing was ever reading the other end).
+        """
         argv = [
             "bash",
             str(remote_dir() / "run-model-queue.sh"),
@@ -177,16 +184,21 @@ class Scheduler:
         ]
         # Pin the working directory: anything the scheduler writes to a relative
         # path lands in the test's own sandbox rather than in the repo.
-        proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=self.env(**env),
-            cwd=self.root,
-        )
+        with open(self.log_dir / "driver.log", "a") as log_file:
+            proc = subprocess.Popen(
+                argv,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                env=self.env(**env),
+                cwd=self.root,
+            )
         self._drivers.append(proc)
         return proc
+
+    def driver_log(self) -> str:
+        """Return the driver's combined stdout/stderr so far."""
+        path = self.log_dir / "driver.log"
+        return path.read_text() if path.exists() else ""
 
     # -- waiting ----------------------------------------------------------
     def wait_for_status(self, model: str, status: str, timeout: float = 20.0) -> None:

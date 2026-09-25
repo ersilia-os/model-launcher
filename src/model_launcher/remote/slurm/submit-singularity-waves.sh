@@ -2,7 +2,7 @@
 # =============================================================================
 # Wave orchestrator for billion-scale libraries — SINGULARITY worker
 # =============================================================================
-# Singularity counterpart of large_library_scripts/submit-ersilia-waves.sh, for
+# Singularity counterpart of submit-ersilia-waves.sh, for
 # models that cannot run under the ersilia apptainer wrapper and are invoked as a
 # plain `singularity run <sif> <in> <out>`. Everything else — the S3-centric,
 # FSx-bounded wave strategy — is identical.
@@ -27,7 +27,7 @@
 # Run it on the HEAD NODE inside tmux/nohup (a full 1.4B run can take days):
 #   tmux new -s waves
 #   S3_BUCKET=ai2050-ersilia-cluster \
-#     /shared/scripts/large_library_scripts/submit-singularity-waves.sh <model_id> <library> 1000 cpu-queue
+#     /shared/scripts/scheduler/slurm/submit-singularity-waves.sh <model_id> <library> 1000 cpu-queue
 #
 # Usage: submit-singularity-waves.sh <model_id> <library_name> [wave_size=1000] [queue=cpu-queue]
 # =============================================================================
@@ -80,7 +80,7 @@ FAILED_LOG="${OUTPUT_DIR}/_failed_chunks.txt"
 # Locate the array-task worker (repo folder first, then the deployed /shared copy).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_JOB="${SCRIPT_DIR}/run-singularity-wave-job.sh"
-[ -f "$RUN_JOB" ] || RUN_JOB="/shared/scripts/large_library_scripts/run-singularity-wave-job.sh"
+[ -f "$RUN_JOB" ] || RUN_JOB="/shared/scripts/scheduler/slurm/run-singularity-wave-job.sh"
 
 if [ ! -f "/shared/sif-files/${MODEL_ID}.sif" ]; then
     echo "ERROR: Model SIF not found: /shared/sif-files/${MODEL_ID}.sif"
@@ -88,7 +88,7 @@ if [ ! -f "/shared/sif-files/${MODEL_ID}.sif" ]; then
     exit 1
 fi
 if [ ! -f "$RUN_JOB" ]; then
-    echo "ERROR: worker script not found: $RUN_JOB (deploy run-singularity-wave-job.sh to /shared/scripts/large_library_scripts)"
+    echo "ERROR: worker script not found: $RUN_JOB (deploy run-singularity-wave-job.sh to /shared/scripts/scheduler/slurm)"
     exit 1
 fi
 

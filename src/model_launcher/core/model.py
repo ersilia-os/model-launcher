@@ -138,6 +138,21 @@ class Snapshot:
         return _int(raw) if raw.isdigit() else 32
 
     @property
+    def dispatch(self) -> str:
+        """How this target runs models: ``slurm`` or ``serve``.
+
+        Absent on a ctl too old to publish it, which predates any dispatch
+        mode but SLURM — so the fallback is the value every existing cluster
+        already is.
+        """
+        return self.runtime.get("dispatch") or "slurm"
+
+    @property
+    def sif_dir(self) -> str:
+        """Where this target expects Singularity/Apptainer images, as reported by ctl."""
+        return self.runtime.get("sif_dir", "")
+
+    @property
     def driver_state(self) -> str:
         """One word for the header: what is this scheduler doing right now."""
         if not self.driver_alive:
@@ -222,7 +237,14 @@ def _parse_kv(lines: List[str]) -> Dict[str, str]:
 
 
 def _parse_status_tsv(lines: List[str]) -> Dict[str, Dict[str, str]]:
-    """status.tsv -> {key: {status, done, total, started, finished, log, note}}."""
+    """status.tsv -> {key: {status, done, total, started, finished, log, note}}.
+
+    ``log`` and ``note`` are written as ``-`` on disk when empty
+    (``scheduler-lib.sh:status_write``) — the same placeholder ``started`` and
+    ``finished`` already use for "no value". Unlike those two, ``-`` is not a
+    real value for log or note, so it is translated back to ``""`` here,
+    mirroring what ``status_load`` does on the bash side.
+    """
     cols = ["status", "done", "total", "started", "finished", "log", "note"]
     out: Dict[str, Dict[str, str]] = {}
     for line in lines:
@@ -233,9 +255,14 @@ def _parse_status_tsv(lines: List[str]) -> Dict[str, Dict[str, str]]:
             continue
         key = parts[0]
         values = parts[1:]
-        out[key] = {
+        row = {
             name: (values[i] if i < len(values) else "") for i, name in enumerate(cols)
         }
+        if row["log"] == "-":
+            row["log"] = ""
+        if row["note"] == "-":
+            row["note"] = ""
+        out[key] = row
     return out
 
 

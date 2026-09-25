@@ -5,7 +5,7 @@
 # Runs an Ersilia model over ALL chunks of a very large library while keeping the
 # 1.2 TB FSx Lustre scratch bounded, and with S3 as the durable store.
 #
-# Strategy (see scripts/large_library_scripts/README.md):
+# Strategy:
 #   * Chunk manifest is built from S3 (`aws s3 ls`), not an `ls *.csv` glob — no
 #     ARG_MAX risk, no FSx listing lag.
 #   * Chunks already present in s3://<bucket>/output/<lib>/<model>/ are skipped, so

@@ -40,7 +40,7 @@ runs on the local machine.
 | `model-launcher` | Open the dashboard (same as `tui`) |
 | `model-launcher tui` | Watch and steer the queue full-screen |
 | `model-launcher check` | Print transport, driver state and per-job progress, then exit |
-| `model-launcher --list-hosts` | List the SSH machines available as `--host` targets |
+| `model-launcher --list-hosts` | List the machines available as `--host` targets (SSH config and tailnet) |
 
 Run `--help` on any command for its options.
 
@@ -58,17 +58,32 @@ while a run is in flight.
 `cpus=N` (override the per-task CPU count), recognised anywhere after the model
 id. Omitting `cpus` leaves the worker's own `#SBATCH` default in charge.
 
+## Deploying the scheduler to a machine
+
+The Python package only gets you the dashboard — the scheduler itself is bash
+that has to be copied onto the target machine separately. See
+[`docs/deploying.md`](docs/deploying.md).
+
+## Attribution
+
+Everyone on a cluster typically shares one unix account, so the scheduler
+cannot tell operators apart on its own. The client reads your own machine's
+local username and passes it along automatically; `$LOG_DIR/audit.log` records
+who ran every mutating command, and cancellation notes say who asked.
+
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest          # 84 tests, no cluster and no AWS credentials needed
+pytest          # 154 tests, no cluster and no AWS credentials needed
 ruff check . && ruff format .
 ```
 
 The test suite drives the real bash scheduler against a fake S3 fixture
 (`SCHED_FAKE_S3`) and a fake orchestrator (`--dry-run`), with recording stubs for
-`aws`, `sbatch`, `squeue` and `scancel` on `PATH`.
+`aws`, `sbatch`, `squeue` and `scancel` on `PATH`. `tests/test_invariants.py`
+pins the fourteen invariants documented in the original `HANDOFF.md`, each of
+which was written after a production bug — read it before changing the bash.
 
 ## About the Ersilia Open Source Initiative
 

@@ -16,7 +16,7 @@
 #   accounting there — so cpus-per-task alone decides how many tasks share a
 #   32-vCPU node, and a heavy model left at the default will OOM. Bigger N =
 #   fewer tasks per node = more memory each = slower. Omit it to keep the
-#   worker's own tuned default (ersilia 10, singularity 4).
+#   worker's own tuned default (ersilia 8, singularity 4).
 #
 # Blank lines and lines starting with '#' (even indented) are ignored.
 #

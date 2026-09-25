@@ -15,6 +15,7 @@ refresh tick costs a few milliseconds instead of a fresh TCP+auth handshake.
 
 from __future__ import annotations
 
+import getpass
 import os
 import shlex
 import subprocess
@@ -23,7 +24,10 @@ from typing import List, Optional, Sequence, Tuple
 
 from .remote import ctl_path
 
-DEFAULT_REMOTE_CTL = "/shared/scripts/large_library_scripts/scheduler/sched-ctl.sh"
+#: Where the deploy guide puts the scheduler. Only a fallback: over SSH the
+#: client first looks for a running driver and uses *its* copy (see
+#: :mod:`model_launcher.core.discover`).
+DEFAULT_REMOTE_CTL = "/shared/scripts/scheduler/sched-ctl.sh"
 
 # Long enough to survive a slow shared filesystem, short enough that a hung
 # connection surfaces as a "stale" banner rather than a frozen UI.
@@ -49,6 +53,11 @@ class Runner:
     queue_file: Optional[str] = None
     s3_bucket: Optional[str] = None
     timeout: int = DEFAULT_TIMEOUT
+    #: Attributed as the operator on ctl's audit log and on cancellation notes.
+    #: Meaningful because it is read on THIS machine, not on the far end —
+    #: everyone on the cluster shares one unix account, so a name from there
+    #: would say nothing. See :func:`build_runner`.
+    who: Optional[str] = None
 
     # -- description ------------------------------------------------------
     @property
@@ -64,6 +73,8 @@ class Runner:
             flags += ["--log-dir", self.log_dir]
         if self.queue_file:
             flags += ["-q", self.queue_file]
+        if self.who:
+            flags += ["--who", self.who]
         return flags
 
     # -- invocation -------------------------------------------------------
@@ -74,6 +85,33 @@ class Runner:
         and is handed back for the UI to show. Only a failure to *execute* raises.
         """
         argv = self._argv([*self._global_flags(), *args])
+        return self._exec(argv, timeout=timeout)
+
+    def run_script(
+        self, script: str, timeout: Optional[int] = None
+    ) -> Tuple[int, str, str]:
+        """Run a self-contained bash ``script`` on the target, without ctl.
+
+        The script goes in on stdin (``bash -s``) rather than as an argument,
+        so its text never appears in any process's argv on the far end — a
+        probe that greps the process table must not be able to find itself.
+
+        Returns
+        -------
+        tuple of (int, str, str)
+            ``(returncode, stdout, stderr)``, as :meth:`run`.
+        """
+        return self._exec(self._shell_argv(), timeout=timeout, stdin=script)
+
+    def _shell_argv(self) -> List[str]:
+        return ["bash", "-s"]
+
+    def _exec(
+        self,
+        argv: List[str],
+        timeout: Optional[int] = None,
+        stdin: Optional[str] = None,
+    ) -> Tuple[int, str, str]:
         env = dict(os.environ)
         if self.s3_bucket:
             env["S3_BUCKET"] = self.s3_bucket
@@ -85,6 +123,7 @@ class Runner:
                 text=True,
                 timeout=budget,
                 env=env,
+                input=stdin,
             )
         except FileNotFoundError as exc:
             raise RunnerError(f"cannot execute {argv[0]!r}: {exc}") from exc
@@ -178,6 +217,9 @@ class SshRunner(Runner):
             env_prefix = f"S3_BUCKET={shlex.quote(self.s3_bucket)} "
         return [*self._ssh_argv(), "--", f"{env_prefix}{remote}"]
 
+    def _shell_argv(self) -> List[str]:
+        return [*self._ssh_argv(), "--", "bash -s"]
+
 
 def build_runner(
     host: Optional[str] = None,
@@ -187,6 +229,7 @@ def build_runner(
     s3_bucket: Optional[str] = None,
     ssh_opts: Optional[Sequence[str]] = None,
     timeout: int = DEFAULT_TIMEOUT,
+    who: Optional[str] = None,
 ) -> Runner:
     """Pick the transport from the arguments/environment.
 
@@ -199,6 +242,7 @@ def build_runner(
     log_dir = log_dir or os.environ.get("LOG_DIR") or None
     queue_file = queue_file or os.environ.get("QUEUE_FILE") or None
     s3_bucket = s3_bucket or os.environ.get("S3_BUCKET") or None
+    who = who or os.environ.get("SCHEDULER_WHO") or _local_identity()
 
     if host:
         return SshRunner(
@@ -209,6 +253,7 @@ def build_runner(
             s3_bucket=s3_bucket,
             ssh_opts=list(ssh_opts or []),
             timeout=timeout,
+            who=who,
         )
 
     if not ctl:
@@ -219,7 +264,27 @@ def build_runner(
         queue_file=queue_file,
         s3_bucket=s3_bucket,
         timeout=timeout,
+        who=who,
     )
+
+
+def _local_identity() -> str:
+    """Best-effort name for whoever is running this client, read on THIS machine.
+
+    Deliberately not read on the target: a name from the shared cluster account
+    would identify no one. ``$USER``/``$LOGNAME`` are checked before
+    :func:`getpass.getuser` because they are what a person is most likely to
+    have deliberately set (e.g. in a container with no password database entry
+    for the running uid, where ``getpass.getuser`` raises).
+    """
+    for var in ("USER", "LOGNAME"):
+        value = os.environ.get(var)
+        if value:
+            return value
+    try:
+        return getpass.getuser()
+    except OSError:
+        return "unknown"
 
 
 def _find_local_ctl() -> Optional[str]:

@@ -17,7 +17,7 @@ set -uo pipefail
 SESSION="${SCHEDULER_TMUX:-scheduler}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRIVER="${SCRIPT_DIR}/run-model-queue.sh"
-[ -f "$DRIVER" ] || DRIVER="/shared/scripts/large_library_scripts/scheduler/run-model-queue.sh"
+[ -f "$DRIVER" ] || DRIVER="/shared/scripts/scheduler/run-model-queue.sh"
 
 if [ "$#" -lt 1 ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
     echo "Usage: $0 <queue_file> [default_library] [default_wave_size] [default_queue] [--dry-run]"

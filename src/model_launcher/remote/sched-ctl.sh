@@ -13,7 +13,7 @@
 # move with it. Your annotations follow their job.
 #
 # Usage:
-#   sched-ctl.sh [-q <queue_file>] [--log-dir <dir>] <command> [args]
+#   sched-ctl.sh [-q <queue_file>] [--log-dir <dir>] [--who <name>] <command> [args]
 #
 # Queue editing (takes effect at the next job boundary):
 #   add <model> <mode> [library] [wave] [queue] [--cpus <n>] [--top|--after <n>]
@@ -48,6 +48,15 @@
 #
 # Env: LOG_DIR (default /shared/logs/scheduler), S3_BUCKET, QUEUE_FILE.
 #      With a driver running, the queue file is discovered from driver.info.
+#
+# --who identifies the operator for the audit log and cancellation notes.
+# Everyone on the cluster shares one unix account, so this has to come from
+# outside — the Python client passes its own operator's local username. With
+# neither --who nor $SCHED_WHO given, WHO is left EMPTY rather than falling
+# back to `id -un`: on the shared account that would always say the same
+# thing for everyone, which reads as an answer without being one. The audit
+# log renders an empty WHO as the word "unknown"; a cancellation note simply
+# omits "by ..." rather than naming the account instead of the person.
 # =============================================================================
 
 set -uo pipefail
@@ -57,23 +66,42 @@ usage() { sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; }
 # ---- global options ---------------------------------------------------------
 CLI_QUEUE=""
 CLI_LOG_DIR=""
+CLI_WHO=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -q|--queue)   CLI_QUEUE="${2:-}"; shift 2 ;;
         --log-dir)    CLI_LOG_DIR="${2:-}"; shift 2 ;;
+        --who)        CLI_WHO="${2:-}"; shift 2 ;;
         -h|--help)    usage; exit 0 ;;
         *)            break ;;
     esac
 done
 [ "$#" -ge 1 ] || { usage; exit 1; }
 CMD="$1"; shift
+WHO="${CLI_WHO:-${SCHED_WHO:-}}"
+
+# ---- locate this script's own directory ----
+# scheduler.conf and scheduler-lib.sh both live beside it, and the conf has to
+# be sourced before ANY ${VAR:-default} below fixes a value it was meant to
+# override.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---- scheduler.conf: per-machine defaults ----
+# A DEFAULTS file, not an assignment file — see scheduler.conf.example.
+# Precedence, high to low: CLI flag > environment > this file > the built-in
+# default hardcoded below. This must run before `--log-dir` is folded in, so
+# an explicit flag still wins over anything the conf sets.
+SCHEDULER_CONF="${SCHEDULER_CONF:-${SCRIPT_DIR}/scheduler.conf}"
+# shellcheck source=/dev/null
+[ -f "$SCHEDULER_CONF" ] && source "$SCHEDULER_CONF"
 
 LOG_DIR="${CLI_LOG_DIR:-${LOG_DIR:-/shared/logs/scheduler}}"
 S3_BUCKET="${S3_BUCKET:-ai2050-ersilia-cluster}"
+SIF_DIR="${SIF_DIR:-/shared/sif-files}"
+DISPATCH="${DISPATCH:-slurm}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="${SCRIPT_DIR}/scheduler-lib.sh"
-[ -f "$LIB" ] || LIB="/shared/scripts/large_library_scripts/scheduler/scheduler-lib.sh"
+[ -f "$LIB" ] || LIB="/shared/scripts/scheduler/scheduler-lib.sh"
 # shellcheck source=/dev/null
 source "$LIB" || { echo "ERROR: cannot source scheduler-lib.sh ($LIB)"; exit 1; }
 
@@ -84,7 +112,10 @@ STATUS_FILE="${STATUS_FILE:-${LOG_DIR}/status.tsv}"
 # The driver resolves aliases BEFORE keying the status store, so `molport` in the
 # queue is stored as Molport_Screening_Compounds_5.3M. We must resolve identically
 # or every status lookup for an aliased entry silently misses and reads "pending".
-for cand in /shared/scripts/library-aliases.sh \
+# The packaged copy beside this script is checked first; the /shared paths are
+# kept for a deployment that predates the scripts moving into this package.
+for cand in "${SCRIPT_DIR}/library-aliases.sh" \
+            /shared/scripts/library-aliases.sh \
             "${SCRIPT_DIR}/../../AWS_templates/library-aliases.sh" \
             /shared/scripts/AWS_templates/library-aliases.sh; do
     # shellcheck source=/dev/null
@@ -542,8 +573,9 @@ cmd_cancel() {
     fi
     if [ "$st" = "running" ]; then
         # Post the KEY, not the model: the driver matches either, and the key cannot
-        # name the wrong library.
-        control_post cancel "$key"
+        # name the wrong library. WHO travels as a second line so the eventual
+        # "cancelled" status note can say who asked for it.
+        control_post cancel "$key" "$WHO"
         echo "cancel requested for RUNNING ${label} — the driver will scancel its"
         echo "in-flight SLURM array and move on (within ${CTL_POLL:-15}s)."
     else
@@ -564,13 +596,15 @@ cmd_stop_after() {
 }
 cmd_shutdown() {
     require_driver shutdown || return 1
-    control_post shutdown ""; echo "shutdown requested — current model will be cancelled"
+    control_post shutdown "" "$WHO"
+    echo "shutdown requested — current model will be cancelled"
 }
 # Only the driver's own bookkeeping needs this. A client-side recount does not:
 # `dump --live-all` counts S3 directly and works with no driver at all.
 cmd_refresh() {
     require_driver refresh || return 1
-    control_post refresh "";  echo "S3 recount requested"
+    control_post refresh "" "$WHO"
+    echo "S3 recount requested"
 }
 
 cmd_list() {
@@ -608,7 +642,7 @@ cmd_list() {
 
 cmd_status() {
     local s="${SCRIPT_DIR}/scheduler-status.sh"
-    [ -x "$s" ] || s="/shared/scripts/large_library_scripts/scheduler/scheduler-status.sh"
+    [ -x "$s" ] || s="/shared/scripts/scheduler/scheduler-status.sh"
     S3_BUCKET="$S3_BUCKET" LOG_DIR="$LOG_DIR" "$s" "$STATE_FILE"
 }
 
@@ -681,6 +715,11 @@ cmd_dump() {
     # than a number hardcoded in the client, which would drift the day the partition
     # gets bigger instance types.
     echo "max_cpus_per_task=${MAX_CPUS_PER_TASK}"
+    echo "sif_dir=${SIF_DIR}"
+    # How this target runs models: `slurm` today; `serve` once a non-SLURM
+    # backend exists. A client that predates this key sees nothing here, which
+    # is fine — the field is additive, like every other line in this section.
+    echo "dispatch=${DISPATCH}"
     echo "now=$(now_iso)"
 
     echo "---8<--- driver.info"
@@ -732,7 +771,8 @@ cmd_dump() {
     # Refreshed from S3 on a --live dump, served from cache otherwise.
     {
         s3_list_libraries ${live:+refresh}
-        for cand in /shared/scripts/library-aliases.sh \
+        for cand in "${SCRIPT_DIR}/library-aliases.sh" \
+                    /shared/scripts/library-aliases.sh \
                     "${SCRIPT_DIR}/../../AWS_templates/library-aliases.sh" \
                     /shared/scripts/AWS_templates/library-aliases.sh; do
             [ -f "$cand" ] || continue
@@ -757,22 +797,30 @@ cmd_dump() {
 # =============================================================================
 # Dispatch
 # =============================================================================
+# Every MUTATING command is recorded in $LOG_DIR/audit.log before it runs — the
+# attempt, not just a success, since a rejected mutation ("cpus out of range")
+# is still something a person did and may want to find later. Read-only
+# commands (list, status, dump, queue-file) are not logged: with everyone on
+# one shared unix account, the audit log exists to answer "who changed
+# something", not to record every look at the dashboard.
 case "$CMD" in
-    add)                need_queue; read_driver_info >/dev/null 2>&1; cmd_add "$@" ;;
-    rm|remove)          need_queue; apply_sel mut_rm "$@" ;;
-    top)                need_queue; apply_sel mut_top "$@" ;;
-    up)                 need_queue; apply_sel mut_up "$@" ;;
-    down)               need_queue; apply_sel mut_down "$@" ;;
-    hold)               need_queue; apply_sel mut_hold "$@" ;;
-    unhold)             need_queue; apply_sel mut_unhold "$@" ;;
-    move)               need_queue; cmd_move "$@" ;;
-    retry)              need_queue; read_driver_info >/dev/null 2>&1; cmd_retry "$@" ;;
-    cancel)             need_queue; cmd_cancel "$@" ;;
-    pause)              cmd_pause ;;
-    resume)             cmd_resume ;;
-    stop-after-current) cmd_stop_after ;;
-    shutdown)           cmd_shutdown ;;
-    refresh)            cmd_refresh ;;
+    add)                need_queue; read_driver_info >/dev/null 2>&1
+                        audit_log "$WHO" add "$@"; cmd_add "$@" ;;
+    rm|remove)          need_queue; audit_log "$WHO" rm "$@"; apply_sel mut_rm "$@" ;;
+    top)                need_queue; audit_log "$WHO" top "$@"; apply_sel mut_top "$@" ;;
+    up)                 need_queue; audit_log "$WHO" up "$@"; apply_sel mut_up "$@" ;;
+    down)               need_queue; audit_log "$WHO" down "$@"; apply_sel mut_down "$@" ;;
+    hold)               need_queue; audit_log "$WHO" hold "$@"; apply_sel mut_hold "$@" ;;
+    unhold)             need_queue; audit_log "$WHO" unhold "$@"; apply_sel mut_unhold "$@" ;;
+    move)               need_queue; audit_log "$WHO" move "$@"; cmd_move "$@" ;;
+    retry)              need_queue; read_driver_info >/dev/null 2>&1
+                        audit_log "$WHO" retry "$@"; cmd_retry "$@" ;;
+    cancel)             need_queue; audit_log "$WHO" cancel "$@"; cmd_cancel "$@" ;;
+    pause)              audit_log "$WHO" pause; cmd_pause ;;
+    resume)             audit_log "$WHO" resume; cmd_resume ;;
+    stop-after-current) audit_log "$WHO" stop-after-current; cmd_stop_after ;;
+    shutdown)           audit_log "$WHO" shutdown; cmd_shutdown ;;
+    refresh)            audit_log "$WHO" refresh; cmd_refresh ;;
     list|ls)            need_queue; read_driver_info >/dev/null 2>&1; cmd_list ;;
     status)             cmd_status ;;
     dump)               resolve_queue_file >/dev/null 2>&1 || true; cmd_dump "$@" ;;

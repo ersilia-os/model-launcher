@@ -3,6 +3,7 @@ data/
 tmp/
 Project_notes.txt
 .vscode/
+docs/roadmap.md
 
 # Juypter
 .jupyter_ystore.db

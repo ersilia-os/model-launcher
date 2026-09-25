@@ -5,7 +5,7 @@ from __future__ import annotations
 import click
 from rich_click import RichCommand
 
-from ...core.runner import build_runner
+from ..target import resolve_target
 
 
 @click.command(cls=RichCommand)
@@ -19,7 +19,7 @@ from ...core.runner import build_runner
 @click.pass_context
 def tui(ctx, refresh):
     """Watch and steer the queue in a full-screen dashboard."""
-    runner = build_runner(**ctx.obj)
+    runner = resolve_target(ctx.obj).runner
 
     if refresh is None:
         # Over SSH each tick is a round-trip; locally it is a fork. Pace accordingly.

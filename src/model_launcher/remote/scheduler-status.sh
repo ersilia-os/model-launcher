@@ -32,7 +32,7 @@ STATE_FILE="${POS[0]:-${STATE_FILE:-${LOG_DIR}/state.tsv}}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="${SCRIPT_DIR}/scheduler-lib.sh"
-[ -f "$LIB" ] || LIB="/shared/scripts/large_library_scripts/scheduler/scheduler-lib.sh"
+[ -f "$LIB" ] || LIB="/shared/scripts/scheduler/scheduler-lib.sh"
 # shellcheck source=/dev/null
 source "$LIB" 2>/dev/null || { echo "ERROR: cannot source scheduler-lib.sh ($LIB)"; exit 1; }
 
