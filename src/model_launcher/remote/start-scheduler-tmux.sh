@@ -25,6 +25,15 @@ if [ "$#" -lt 1 ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
 fi
 
 command -v tmux >/dev/null 2>&1 || { echo "ERROR: tmux is not installed."; exit 1; }
+
+# Where the driver is a systemd service, a second one in tmux would only fail on
+# the lock (exit 75) — or, worse, be mistaken for the real one. Point at systemctl.
+UNIT="${SCHEDULER_UNIT:-ersilia-scheduler}"
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+    echo "ERROR: the scheduler runs as the systemd service '$UNIT' on this machine."
+    echo "       Manage it with:  sudo systemctl status|stop|start|restart $UNIT"
+    exit 1
+fi
 [ -f "$DRIVER" ] || { echo "ERROR: driver not found: $DRIVER"; exit 1; }
 
 QUEUE_FILE="$1"

@@ -94,10 +94,12 @@ AUTO_FETCH_SIF="${AUTO_FETCH_SIF:-0}"
 SIF_DIR="${SIF_DIR:-/shared/sif-files}"
 DOWNLOAD_SCRIPT="${DOWNLOAD_SCRIPT:-/shared/scripts/download-ersilia-model.sh}"
 LOG_DIR="${LOG_DIR:-/shared/logs/scheduler}"
-# Exported (not just set) so a driver started with no explicit LOG_DIR still
-# carries its resolved value in its own environment — driver_pid_scan reads
-# this back from /proc to tell "our" driver apart from one against a
-# different LOG_DIR, and can only do that if it is actually there to read.
+# Exported so every child (ctl helpers, orchestrators) resolves the same value.
+# NOT enough on its own for driver_pid_scan / client discovery, which read
+# /proc/<pid>/environ: that is the environment the process was exec'd WITH, and
+# an `export` here never shows up in it. A launcher has to set LOG_DIR before
+# exec'ing this script — start-scheduler-tmux.sh and scheduler-service.sh both
+# do. A driver started by hand without one is invisible to both scans.
 export LOG_DIR
 STATE_FILE="${STATE_FILE:-${LOG_DIR}/state.tsv}"
 STATUS_FILE="${STATUS_FILE:-${LOG_DIR}/status.tsv}"
@@ -141,12 +143,84 @@ WAVES_DIR="${WAVES_DIR:-${SCRIPT_DIR}/slurm}"
 
 mkdir -p "$LOG_DIR" "$(control_dir)"
 
-# ---- single-driver lock (atomic mkdir) ----
-LOCK="${LOG_DIR}/.lock"
-if ! mkdir "$LOCK" 2>/dev/null; then
-    echo "ERROR: another driver holds the lock: $LOCK"
-    echo "       If no scheduler is running, remove it:  rmdir $LOCK"
-    exit 1
+# ---- single-driver lock ----
+#
+# A flock on fd 8 (fd 9 belongs to queue_locked). The kernel releases it however
+# the driver dies — including SIGKILL, which no trap can see. The mkdir lock it
+# replaces could not: a SIGKILLed driver left the directory behind, every restart
+# then exited "another driver holds the lock", and a supervisor restarting on
+# failure looped until it gave up — while the interrupted job stayed `running`.
+#
+# Lock held => exit 75 (EX_TEMPFAIL). The systemd unit lists 75 as
+# RestartPreventExitStatus: a conflict should fail once and loudly, not loop.
+LOCK_FILE="${LOG_DIR}/.driver.lock"
+LEGACY_LOCK="${LOG_DIR}/.lock"
+LOCK_HELD_RC=75
+DRIVER_LOCK=""
+
+# Is $1 this driver or one of its own subshells? Those share its argv and
+# environment, and the scan below runs inside $(...) — so its helpers are
+# grandchildren, not just children, of $$.
+is_self_or_descendant() {  # $1 = pid
+    local p="$1" n=0
+    while [ -n "$p" ] && [ "$p" -gt 1 ] && [ "$n" -lt 16 ]; do
+        [ "$p" = "$$" ] && return 0
+        p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+        n=$((n + 1))
+    done
+    return 1
+}
+
+# Another live driver on this LOG_DIR, if any. driver_pid_scan cannot answer this
+# from inside a driver: this process and its subshells match its pattern too.
+# Conservative on purpose: a candidate with NO LOG_DIR in its environment counts,
+# since its built-in default may well be ours.
+other_driver_pid() {
+    local pid env_dir
+    for pid in $(pgrep -u "$(id -u)" -f 'run-model-queue\.sh' 2>/dev/null); do
+        is_self_or_descendant "$pid" && continue
+        is_driver_process "$pid" || continue
+        # Gone already (a short-lived subshell): nothing to compare against.
+        [ -r "/proc/${pid}/environ" ] || continue
+        env_dir="$(tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null | sed -n 's/^LOG_DIR=//p' | head -n 1)"
+        [ -n "$env_dir" ] && [ "$env_dir" != "$LOG_DIR" ] && continue
+        kill -0 "$pid" 2>/dev/null || continue
+        printf '%s\n' "$pid"
+        return 0
+    done
+}
+
+# Upgrade guard: a pre-flock driver holds only the .lock DIRECTORY and would never
+# see our flock. Refuse while it lives; clear the directory once it is stale.
+if [ -d "$LEGACY_LOCK" ]; then
+    other="$(other_driver_pid)"
+    if [ -n "$other" ]; then
+        echo "ERROR: an older driver (pid ${other}) holds ${LEGACY_LOCK} — stop it first."
+        exit "$LOCK_HELD_RC"
+    fi
+    rmdir "$LEGACY_LOCK" 2>/dev/null \
+        && echo "[$(now_iso)] removed stale lock directory ${LEGACY_LOCK} (no driver was holding it)"
+fi
+
+if command -v flock >/dev/null 2>&1; then
+    exec 8>>"$LOCK_FILE" || { echo "ERROR: cannot open driver lock $LOCK_FILE"; exit 1; }
+    if ! flock -n 8; then
+        echo "ERROR: another driver holds the lock: $LOCK_FILE (pid $(cat "$LOCK_FILE" 2>/dev/null || echo '?'))"
+        exit "$LOCK_HELD_RC"
+    fi
+    # The content is only for the message above; the lock is the flock itself.
+    # Never delete this file: a process could open the old inode and "win" a lock
+    # nobody else can see.
+    echo "$$" > "$LOCK_FILE"
+    DRIVER_LOCK=flock
+else
+    # No flock (e.g. macOS without util-linux): the old behaviour, stale-on-SIGKILL.
+    if ! mkdir "$LEGACY_LOCK" 2>/dev/null; then
+        echo "ERROR: another driver holds the lock: $LEGACY_LOCK"
+        echo "       If no scheduler is running, remove it:  rmdir $LEGACY_LOCK"
+        exit "$LOCK_HELD_RC"
+    fi
+    DRIVER_LOCK=mkdir
 fi
 cleanup() {
     # Take the orchestrator down with us.
@@ -163,7 +237,7 @@ cleanup() {
             status_update "$CURRENT_KEY" cancelled "stopped because the driver exited"
         fi
     fi
-    rmdir "$LOCK" 2>/dev/null
+    [ "$DRIVER_LOCK" = mkdir ] && rmdir "$LEGACY_LOCK" 2>/dev/null
     rm -f "${STATE_FILE}.tmp.$$" "$(status_file).tmp.$$" 2>/dev/null
     rm -f "$(driver_info)" 2>/dev/null
 }
@@ -519,12 +593,10 @@ cancel_child() {  # $1 = logfile
 
     # Now that nothing can resubmit, drop whatever it left on the queue. Ids come
     # from THIS job's log only, so we can never scancel something we did not start.
-    if [ -f "$logf" ]; then
-        for aid in $(grep -oP 'Submitted (array|batch) job \K[0-9]+' "$logf" 2>/dev/null | sort -u); do
-            log_line "  scancel ${aid}"
-            scancel "$aid" 2>/dev/null
-        done
-    fi
+    for aid in $(log_submitted_ids "$logf"); do
+        log_line "  scancel ${aid}"
+        scancel "$aid" 2>/dev/null
+    done
 }
 
 # Run one queue entry to completion (or cancellation). Returns the child's rc,
@@ -583,11 +655,14 @@ run_job() {  # $1 = index
     if [ "$DRY_RUN" -eq 1 ]; then
         log_line "  [dry-run] S3_BUCKET=$S3_BUCKET POLL_SECONDS=$POLL_SECONDS ${cpus:+CPUS_PER_TASK=$cpus }$script $model $lib $wave $queue"
         # A real sleeping child, so the poll/cancel path is genuinely exercised.
-        setsid sleep "${SCHED_FAKE_DURATION:-30}" >>"${Q_LOG[i]}" 2>&1 &
+        setsid sleep "${SCHED_FAKE_DURATION:-30}" >>"${Q_LOG[i]}" 2>&1 8>&- &
     else
         log_line "  dispatch: ${cpus:+CPUS_PER_TASK=$cpus }$script $model $lib $wave $queue  (log: ${Q_LOG[i]})"
+        # 8>&- : the orchestrator must not inherit the driver lock. A flock lives
+        # as long as ANY copy of its fd, so an orphan outliving a killed driver
+        # would otherwise keep every new driver from starting for hours.
         S3_BUCKET="$S3_BUCKET" POLL_SECONDS="$POLL_SECONDS" CPUS_PER_TASK="$cpus" \
-            setsid "$script" "$model" "$lib" "$wave" "$queue" >>"${Q_LOG[i]}" 2>&1 &
+            setsid "$script" "$model" "$lib" "$wave" "$queue" >>"${Q_LOG[i]}" 2>&1 8>&- &
     fi
     CHILD_PID=$!
     CHILD_PGID="$(ps -o pgid= -p "$CHILD_PID" 2>/dev/null | tr -d ' ')"

@@ -16,11 +16,22 @@
 #   driver.info    key=value facts about the live driver (pid, queue path, ...)
 #   control/       paused / stop-after-current flag files + one-shot messages
 #   .queue.lock    flock target guarding every queue-file read/write
-#   .lock/         atomic-mkdir single-driver lock (driver only)
+#   .driver.lock   flock single-driver lock (driver only; content = holder pid)
+#   .lock/         mkdir single-driver lock — only where flock is missing, or left
+#                  behind by a pre-flock driver (the driver clears a stale one)
 # =============================================================================
 
 # ISO-8601 UTC timestamp, e.g. 2026-07-23T09:01:22Z
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# SLURM job ids the orchestrator recorded submitting, one per line, from ONE job's
+# log. The only source either cancel path may use (the driver's cancel_child, and
+# scheduler-service.sh's post-crash reap): ids come from THIS job's own log, so
+# neither can ever scancel something the scheduler did not start.
+log_submitted_ids() {  # $1 = logfile
+    [ -f "$1" ] || return 0
+    grep -oP 'Submitted (array|batch) job \K[0-9]+' "$1" 2>/dev/null | sort -u
+}
 
 # All the statuses the scheduler can assign, in display order. Single source of
 # truth for the summary lines in the driver, the renderer and the TUI.
@@ -434,6 +445,20 @@ read_driver_info() {
         printf -v "DI_${k}" '%s' "$v"
     done < "$f"
     return 0
+}
+
+# Is pid $1 actually a driver — a process whose argv RUNS run-model-queue.sh — rather
+# than one that merely mentions it? `pgrep -f` matches both. The tmux server's argv
+# is the whole `tmux new-session ... run-model-queue.sh ...` command that started
+# it, as one word, and it outlives the scheduler session while any other session
+# exists; with no LOG_DIR of its own it would pass for a driver.
+is_driver_process() {  # $1 = pid
+    local arg
+    [ -r "/proc/$1/cmdline" ] || return 1
+    while IFS= read -r -d '' arg; do
+        case "$arg" in */run-model-queue.sh|run-model-queue.sh) return 0 ;; esac
+    done < "/proc/$1/cmdline"
+    return 1
 }
 
 # PID of a running driver for THIS $LOG_DIR, if any.

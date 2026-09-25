@@ -541,7 +541,8 @@ resolve_key() {  # $1 = model|mode|library
 require_driver() {  # $1 = verb name, for the message
     driver_alive && return 0
     echo "ERROR: no driver is running — '$1' has nothing to act on." >&2
-    echo "       Start one with start-scheduler-tmux.sh." >&2
+    echo "       Start one: sudo systemctl start ersilia-scheduler  (if installed as a" >&2
+    echo "       service — see install-scheduler-service.sh), else start-scheduler-tmux.sh." >&2
     echo "       Queue edits (add/rm/top/up/down/hold/retry) do not need a driver:" >&2
     echo "       they are written to the queue and apply as soon as one starts." >&2
     return 1

@@ -7,16 +7,6 @@ resolvable, and we list both:
 * a device on the Ersilia tailnet — how the workstations are reached, via
   Tailscale SSH and MagicDNS, with no ``~/.ssh/config`` entry at all.
 
-Listing them turns "which machines can I drive?" from tribal knowledge into
-something the tool answers, which is the point of running models somewhere
-other than the one cluster.
-
-Only names worth connecting to are returned. ``Host *`` and other SSH patterns
-configure *other* hosts rather than naming one; phones and tablets on the
-tailnet cannot run a model; and a colleague's personal laptop, though real and
-online, is not a machine we have a login on. Offering any of those as a target
-would be a guaranteed failure — see :func:`_has_login` for exactly which
-tailnet devices clear that bar.
 """
 
 from __future__ import annotations
