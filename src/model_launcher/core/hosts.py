@@ -331,3 +331,45 @@ def available_targets(
             )
         )
     return targets
+
+
+# ---------------------------------------------------------------------------
+# Last-used host
+# ---------------------------------------------------------------------------
+
+#: How :func:`save_last_host` spells "this machine" on disk.
+LOCAL = "local"
+
+
+def _last_host_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return Path(base) / "model-launcher" / "last-host"
+
+
+def load_last_host() -> Optional[str]:
+    """Return the host the dashboard last connected to, if remembered.
+
+    Returns
+    -------
+    str or None
+        An SSH alias, :data:`LOCAL` for this machine, or None if nothing is
+        remembered or the file cannot be read.
+    """
+    try:
+        name = _last_host_path().read_text().strip()
+    except (OSError, UnicodeError):
+        return None
+    return name or None
+
+
+def save_last_host(name: Optional[str]) -> None:
+    """Remember ``name`` (None = this machine) as the last-used host.
+
+    Best effort: a read-only home directory must not stop the dashboard.
+    """
+    path = _last_host_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{name or LOCAL}\n")
+    except OSError:
+        pass

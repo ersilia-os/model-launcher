@@ -23,6 +23,8 @@ from textual.reactive import reactive
 from textual.widgets import Button, Footer, RichLog, Static
 
 from .dialogs import AddScreen, ConfirmScreen
+from .hosts import HostScreen
+from ..core.hosts import LOCAL, save_last_host
 from ..core.model import (
     Job,
     Snapshot,
@@ -31,6 +33,7 @@ from ..core.model import (
     parse_dump,
 )
 from ..core.runner import Runner, RunnerError
+from ..core.target import Resolution
 from .theme import DARK_THEME, LIGHT_THEME, THEMES
 from .widgets import ContextMenu, QueueTable, Splitter, StatChips, set_dark
 
@@ -68,6 +71,7 @@ class SchedulerTUI(App):
         Binding("c", "cancel", "cancel"),
         Binding("p", "pause", "pause"),
         Binding("l", "toggle_log", "log"),
+        Binding("H", "switch_host", "host"),
         Binding("q", "quit", "quit"),
         Binding("r", "retry", "retry", show=False),
         Binding("s", "stop_after", "stop after current", show=False),
@@ -79,15 +83,26 @@ class SchedulerTUI(App):
     show_log: reactive[bool] = reactive(False)
     follow_log: reactive[bool] = reactive(True)
 
+    #: Options that only make sense for the machine they were given with. An
+    #: explicit --ctl or --log-dir names a path on ONE host; carried over to the
+    #: next host after a switch it would point at nothing, or at the wrong thing.
+    HOST_SPECIFIC = ("ctl", "log_dir", "queue_file")
+
     def __init__(
         self,
-        runner: Runner,
+        runner: Optional[Runner],
         refresh_interval: float = 2.0,
         live_interval: float = 60.0,
         start_theme: str = DARK_THEME,
+        options: Optional[dict] = None,
     ) -> None:
         super().__init__()
+        #: None until a host is picked (the dashboard was opened without --host).
         self.runner = runner
+        self._options = dict(options or {})
+        self._host_key: Optional[str] = None
+        if runner is not None:
+            self._host_key = getattr(runner, "host", "") or LOCAL
         self.refresh_interval = refresh_interval
         self.live_interval = live_interval
         self.start_theme = start_theme
@@ -152,7 +167,10 @@ class SchedulerTUI(App):
             self.register_theme(theme)
         self.theme = self.start_theme
         self.query_one("#table", QueueTable).focus()
-        self.refresh_snapshot()
+        if self.runner is None:
+            self._pick_host(initial=True)
+        else:
+            self.refresh_snapshot()
         self.set_interval(self.refresh_interval, self._tick)
         # Periodically ask for a real S3 recount, the way scheduler-status.sh does.
         # Totals cost one listing per library and `done` one for the running row, so
@@ -170,12 +188,14 @@ class SchedulerTUI(App):
         a 2-second tick would cancel the recount and discard its result — the very
         numbers the user asked for, thrown away seconds before they arrive.
         """
-        if self._live_in_flight:
+        if self._live_in_flight or self.runner is None:
             return
         self.refresh_snapshot()
 
     def _request_live(self, scope: str = "running") -> None:
         """Mark the next dump as needing an S3 recount, and fetch it now."""
+        if self.runner is None:
+            return
         # "all" must not be downgraded by a periodic tick that lands first.
         if scope == "all" or self._live_scope != "all":
             self._live_scope = scope
@@ -184,16 +204,26 @@ class SchedulerTUI(App):
 
     @work(thread=True, exclusive=True, group="dump")
     def refresh_snapshot(self) -> None:
-        """Poll one snapshot. Runs off the UI thread; posts the result back."""
+        """Poll one snapshot. Runs off the UI thread; posts the result back.
+
+        The runner is captured once and travels with the result. After a host
+        switch, a dump still in flight from the old host (a full recount can
+        take minutes) must be recognised as stale and dropped — otherwise its
+        counts would be harvested into the new host's cache under matching job
+        keys, and one machine's progress would show on another's jobs.
+        """
+        runner = self.runner
+        if runner is None:
+            return
         log_path = self._log_path_for_request()
         scope, self._live_scope = self._live_scope, ""
         try:
-            text = self.runner.dump(log_path, live=scope)
+            text = runner.dump(log_path, live=scope)
         except RunnerError as exc:
-            self.call_from_thread(self._on_transport_error, str(exc))
+            self.call_from_thread(self._on_transport_error, str(exc), runner)
             return
         snapshot = parse_dump(text)
-        self.call_from_thread(self._on_snapshot, snapshot)
+        self.call_from_thread(self._on_snapshot, snapshot, runner)
 
     def _log_path_for_request(self) -> Optional[str]:
         """Ask for a log tail only when the pane is open — a 300-line tail per
@@ -207,7 +237,9 @@ class SchedulerTUI(App):
         job = self.snapshot.find_by_key(key)
         return job.log if job and job.log else None
 
-    def _on_transport_error(self, message: str) -> None:
+    def _on_transport_error(self, message: str, runner: Runner) -> None:
+        if runner is not self.runner:
+            return  # from a host we have since switched away from
         self._live_in_flight = False
         if self._recounting:
             self._recounting = False
@@ -215,7 +247,9 @@ class SchedulerTUI(App):
         self.snapshot.error = message
         self._render_banner(f"Cannot reach the scheduler: {message}", error=True)
 
-    def _on_snapshot(self, snapshot: Snapshot) -> None:
+    def _on_snapshot(self, snapshot: Snapshot, runner: Runner) -> None:
+        if runner is not self.runner:
+            return  # from a host we have since switched away from
         self._live_in_flight = False
         # Carry live S3 counts across the cheap refreshes that do not include them.
         if snapshot.counts_are_live:
@@ -339,8 +373,11 @@ class SchedulerTUI(App):
     @work(thread=True, group="ctl")
     def run_ctl(self, *args: str) -> None:
         """Invoke a ctl verb and report the outcome as a toast."""
+        runner = self.runner
+        if runner is None:
+            return
         try:
-            rc, out, err = self.runner.run(*args)
+            rc, out, err = runner.run(*args)
         except RunnerError as exc:
             self.call_from_thread(self.notify, str(exc), severity="error", timeout=8)
             return
@@ -350,8 +387,9 @@ class SchedulerTUI(App):
         severity = "information" if rc == 0 else "error"
         self.call_from_thread(self.notify, headline, severity=severity, timeout=6)
         # Pull a fresh snapshot immediately so the table reflects the change now
-        # rather than at the next tick.
-        self.call_from_thread(self.refresh_snapshot)
+        # rather than at the next tick — unless the host changed meanwhile.
+        if runner is self.runner:
+            self.call_from_thread(self.refresh_snapshot)
 
     # ------------------------------------------------------------------
     # selection helpers
@@ -543,6 +581,56 @@ class SchedulerTUI(App):
     def action_toggle_follow(self) -> None:
         self.follow_log = not self.follow_log
         self._render_log()
+
+    def action_switch_host(self) -> None:
+        self._pick_host(initial=False)
+
+    # ------------------------------------------------------------------
+    # host switching
+    # ------------------------------------------------------------------
+    def _pick_host(self, initial: bool) -> None:
+        """Open the host picker. Cancelled at startup, there is nothing to show."""
+
+        def on_close(resolution: Optional[Resolution]) -> None:
+            if resolution is not None and resolution.runner is not None:
+                self._connect(resolution)
+            elif self.runner is None:
+                self.exit()
+
+        self.push_screen(HostScreen(self._options, self._host_key), on_close)
+
+    def _connect(self, resolution: Resolution) -> None:
+        """Point the dashboard at another scheduler, forgetting the old one.
+
+        Everything cached is per-host and must go: the S3 counts (keyed by job
+        key, which says nothing about the machine), the snapshot, the selected
+        log, the status filter. In-flight dumps are cancelled, and any that
+        still report back are dropped by the runner check in _on_snapshot.
+        """
+        self.workers.cancel_group(self, "dump")
+        self.runner = resolution.runner
+        self._host_key = resolution.host or LOCAL
+        # Host-specific CLI options applied to the first connection only.
+        self._options = {
+            k: v for k, v in self._options.items() if k not in self.HOST_SPECIFIC
+        }
+        self._count_cache = {}
+        self.snapshot = Snapshot()
+        self._log_model = None
+        self._log_rendered = None
+        self.filter_status = None
+        self._live_scope = "running"
+        self._live_in_flight = False
+        self._recounting = False
+        save_last_host(resolution.host or None)
+        self._render_banner(None)
+        self._render_table()
+        self._render_chips()
+        if resolution.warning:
+            self.notify(resolution.warning, severity="warning", timeout=10)
+        if resolution.hint:
+            self.notify(resolution.hint, severity="warning", timeout=10)
+        self.refresh_snapshot()
 
     # ------------------------------------------------------------------
     # reactive watchers

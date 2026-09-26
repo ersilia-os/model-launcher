@@ -14,7 +14,7 @@ import time
 import click
 import pytest
 
-from model_launcher.cli import target as target_mod
+from model_launcher.core import target as target_mod
 from model_launcher.cli.target import resolve_target
 from model_launcher.core.discover import Driver, discover_drivers
 from model_launcher.core.remote import ctl_path

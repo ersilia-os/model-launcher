@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import posixpath
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional, Tuple
 
 from .remote import CTL_NAME
-from .runner import Runner, RunnerError
+from .runner import LocalRunner, Runner, RunnerError, SshRunner
 
 #: One line per scheduler instance: ``pid<TAB>log_dir<TAB>script_dir``.
 #:
@@ -118,3 +118,68 @@ def discover_drivers(runner: Runner) -> List[Driver]:
             )
         )
     return drivers
+
+
+#: A probe is a quick "is anything there?" for a list of hosts, so it must not
+#: wait on a dead machine for as long as a real ctl call would.
+PROBE_TIMEOUT = 10
+PROBE_SSH_OPTS = ("-o", "ConnectTimeout=5")
+
+
+@dataclass(frozen=True)
+class HostStatus:
+    """What a quick probe found on one host.
+
+    Attributes
+    ----------
+    state : str
+        ``running`` (one or more drivers), ``none`` or ``unreachable``.
+    drivers : tuple of Driver
+        The drivers found, when ``running``.
+    detail : str
+        The transport error, when ``unreachable``.
+    """
+
+    state: str
+    drivers: Tuple[Driver, ...] = ()
+    detail: str = ""
+
+    @property
+    def label(self) -> str:
+        """One short phrase for a host list, e.g. ``RUNNING · pid 29886``."""
+        if self.state == "running":
+            if len(self.drivers) == 1:
+                return f"RUNNING · pid {self.drivers[0].pid}"
+            return f"RUNNING · {len(self.drivers)} drivers"
+        return "no driver" if self.state == "none" else "unreachable"
+
+
+def probe_host(host: Optional[str]) -> HostStatus:
+    """Check which scheduler drivers are running on one host, quickly.
+
+    Parameters
+    ----------
+    host : str or None
+        SSH alias to probe, or None for this machine.
+
+    Returns
+    -------
+    HostStatus
+        Never raises: an unreachable host is a status, not an error.
+    """
+    if host:
+        runner: Runner = SshRunner(
+            ctl="unused",
+            host=host,
+            ssh_opts=list(PROBE_SSH_OPTS),
+            timeout=PROBE_TIMEOUT,
+        )
+    else:
+        runner = LocalRunner(ctl="unused", timeout=PROBE_TIMEOUT)
+    try:
+        drivers = discover_drivers(runner)
+    except RunnerError as exc:
+        return HostStatus("unreachable", detail=str(exc))
+    if not drivers:
+        return HostStatus("none")
+    return HostStatus("running", drivers=tuple(drivers))

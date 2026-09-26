@@ -171,8 +171,34 @@ QueueTable > .datatable--hover { background: $panel; }
 }
 
 /* ---- modals -------------------------------------------------------------- */
-AddScreen, ConfirmScreen {
+AddScreen, ConfirmScreen, HostScreen {
     align: center middle;
+}
+/* Wider than the other dialogs: each row carries name, transport, live status
+   and a detail column, and truncating the status is the one thing that defeats
+   the point of the list. */
+#host-box {
+    width: 96;
+    max-width: 95%;
+    height: auto;
+    max-height: 90%;
+    padding: 1 2;
+    background: $surface;
+    border: round $primary;
+}
+#host-title {
+    text-style: bold;
+    color: $primary;
+}
+#host-hint {
+    color: $text-muted;
+    padding-bottom: 1;
+}
+#host-list {
+    height: auto;
+    max-height: 20;
+    border: none;
+    background: $surface;
 }
 #add-box, #confirm-box {
     width: 64;
