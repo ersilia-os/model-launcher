@@ -17,15 +17,31 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import pytest
 
 from model_launcher.core.model import Snapshot, parse_dump
 from model_launcher.core.remote import remote_dir
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip ``linux_only`` tests off Linux.
+
+    The scheduler targets Linux: it launches the orchestrator under ``setsid``
+    and finds drivers through ``/proc``. macOS has neither, so a job started
+    there exits at once and a running driver cannot be discovered.
+    """
+    if sys.platform.startswith("linux"):
+        return
+    skip = pytest.mark.skip(reason="needs Linux (setsid, /proc)")
+    for item in items:
+        if "linux_only" in item.keywords:
+            item.add_marker(skip)
+
 
 #: Stubs that record their argv, so a test can assert what the scheduler invoked.
 STUB_BINARIES = ("aws", "sbatch", "squeue", "scancel")
@@ -79,10 +95,10 @@ class Scheduler:
     call_log: Path
     fake_s3: bool = True
     default_library: str = "testlib"
-    _drivers: List[subprocess.Popen] = field(default_factory=list)
+    _drivers: list[subprocess.Popen] = field(default_factory=list)
 
     # -- environment ------------------------------------------------------
-    def env(self, **overrides: str) -> Dict[str, str]:
+    def env(self, **overrides: str) -> dict[str, str]:
         """Build the environment every scheduler process runs under."""
         env = dict(os.environ)
         env.update(
@@ -109,7 +125,7 @@ class Scheduler:
         """Write the fake-S3 fixture: ``input <lib> <n>`` / ``output <model> <lib> <mode> <n>``."""
         (self.log_dir / "fake-s3.txt").write_text(text.strip("\n") + "\n")
 
-    def write_status(self, rows: List[str]) -> None:
+    def write_status(self, rows: list[str]) -> None:
         """Write ``status.tsv`` directly, to seed a pre-existing verdict."""
         header = "#key\tstatus\tdone\ttotal\tstarted\tfinished\tlog\tnote"
         (self.log_dir / "status.tsv").write_text("\n".join([header, *rows]) + "\n")
@@ -118,7 +134,7 @@ class Scheduler:
         """Return the current queue-file contents."""
         return self.queue_file.read_text()
 
-    def stub_calls(self, name: str) -> List[str]:
+    def stub_calls(self, name: str) -> list[str]:
         """Return every recorded invocation of stub ``name``."""
         path = Path(f"{self.call_log}.{name}")
         if not path.exists():
@@ -146,6 +162,7 @@ class Scheduler:
         proc = subprocess.run(
             argv,
             capture_output=True,
+            check=False,
             text=True,
             env=self.env(**env),
             cwd=self.root,
@@ -221,10 +238,10 @@ class Scheduler:
         if not _wait_for(info.exists, timeout):
             raise AssertionError("driver never wrote driver.info")
 
-    def sleep_children(self) -> List[int]:
+    def sleep_children(self) -> list[int]:
         """PIDs of the fake orchestrators (``sleep 600``) this instance started."""
         proc = subprocess.run(
-            ["pgrep", "-f", "sleep 600"], capture_output=True, text=True
+            ["pgrep", "-f", "sleep 600"], capture_output=True, check=False, text=True
         )
         return [int(p) for p in proc.stdout.split()]
 
@@ -280,7 +297,7 @@ def running_scheduler(scheduler: Scheduler) -> Scheduler:
 
 
 def bash_eval(
-    snippet: str, env: Optional[Dict[str, str]] = None
+    snippet: str, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess:
     """Source ``scheduler-lib.sh`` and run ``snippet`` against it.
 
@@ -291,6 +308,7 @@ def bash_eval(
     return subprocess.run(
         ["bash", "-c", script],
         capture_output=True,
+        check=False,
         text=True,
         env={**os.environ, **(env or {})},
         timeout=60,

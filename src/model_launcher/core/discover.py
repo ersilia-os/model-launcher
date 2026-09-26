@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import posixpath
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
 
 from .remote import CTL_NAME
 from .runner import LocalRunner, Runner, RunnerError, SshRunner
@@ -83,7 +82,7 @@ class Driver:
     ctl: str
 
 
-def discover_drivers(runner: Runner) -> List[Driver]:
+def discover_drivers(runner: Runner) -> list[Driver]:
     """List the scheduler drivers running on the runner's target.
 
     Parameters
@@ -141,7 +140,7 @@ class HostStatus:
     """
 
     state: str
-    drivers: Tuple[Driver, ...] = ()
+    drivers: tuple[Driver, ...] = ()
     detail: str = ""
 
     @property
@@ -154,7 +153,7 @@ class HostStatus:
         return "no driver" if self.state == "none" else "unreachable"
 
 
-def probe_host(host: Optional[str]) -> HostStatus:
+def probe_host(host: str | None) -> HostStatus:
     """Check which scheduler drivers are running on one host, quickly.
 
     Parameters

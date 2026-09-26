@@ -50,7 +50,9 @@ def _info_pid(scheduler) -> str:
 
 def _kill_orphans(log_dir: Path) -> None:
     """SIGKILL the fake orchestrators a killed driver left behind (ours only)."""
-    proc = subprocess.run(["pgrep", "-f", "sleep 600"], capture_output=True, text=True)
+    proc = subprocess.run(
+        ["pgrep", "-f", "sleep 600"], capture_output=True, check=False, text=True
+    )
     for pid in proc.stdout.split():
         try:
             env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
@@ -70,6 +72,7 @@ def test_a_second_driver_on_the_same_log_dir_exits_75(running_scheduler):
     assert "another driver holds the lock" in running_scheduler.driver_log()
 
 
+@pytest.mark.linux_only
 def test_a_sigkilled_driver_does_not_block_the_next_one(scheduler):
     """The old mkdir lock outlived SIGKILL; every restart then failed forever."""
     scheduler.write_queue("eos_x ersilia testlib")
@@ -119,6 +122,7 @@ def test_a_process_that_only_mentions_the_driver_is_not_a_driver(scheduler):
         lookalike.wait(timeout=10)
 
 
+@pytest.mark.linux_only
 def test_a_live_legacy_lock_holder_is_respected(running_scheduler):
     """A pre-flock driver never sees our flock, so its directory must still count."""
     (running_scheduler.log_dir / ".lock").mkdir()
@@ -130,6 +134,7 @@ def test_a_live_legacy_lock_holder_is_respected(running_scheduler):
 # --- scheduler-service.sh ---------------------------------------------------
 
 
+@pytest.mark.linux_only
 def test_service_start_becomes_the_driver_and_is_discoverable(scheduler, tmp_path):
     """LOG_DIR comes only from scheduler.conf here, as it would under systemd.
 
@@ -168,11 +173,13 @@ def _stop_post(scheduler) -> subprocess.CompletedProcess:
         ["bash", str(SERVICE), "stop-post"],
         env=scheduler.env(),
         capture_output=True,
+        check=False,
         text=True,
         timeout=60,
     )
 
 
+@pytest.mark.linux_only
 def test_stop_post_cancels_what_a_crashed_driver_left_on_slurm(scheduler):
     job_log = scheduler.log_dir / "eos_x_testlib.log"
     job_log.write_text("Submitted array job 4242\nSubmitted batch job 4243\n")
@@ -211,6 +218,7 @@ def _render(scheduler, *args: str, **env: str) -> subprocess.CompletedProcess:
         ["bash", str(INSTALL), "--print", str(scheduler.queue_file), *args],
         env=scheduler.env(**env),
         capture_output=True,
+        check=False,
         text=True,
         timeout=60,
     )
@@ -263,6 +271,7 @@ def test_the_unit_passes_systemd_analyze_verify(scheduler, tmp_path):
     proc = subprocess.run(
         ["systemd-analyze", "verify", str(unit)],
         capture_output=True,
+        check=False,
         text=True,
         timeout=60,
     )

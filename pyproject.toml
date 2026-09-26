@@ -23,7 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest==8.4.2",
-  "ruff==0.15.11",
+  "ruff==0.16.9",
 ]
 
 [project.scripts]
@@ -37,3 +37,6 @@ model_launcher = ["tui/*.tcss", "remote/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "linux_only: needs setsid and /proc, which the scheduler assumes; skipped elsewhere",
+]

@@ -14,7 +14,6 @@ are resolved exactly once, on the side that owns the alias table.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 SECTION_MARKER = "---8<---"
 
@@ -80,14 +79,14 @@ class Job:
 class Snapshot:
     """Everything one ``dump`` told us."""
 
-    runtime: Dict[str, str] = field(default_factory=dict)
-    driver_info: Dict[str, str] = field(default_factory=dict)
-    jobs: List[Job] = field(default_factory=list)
-    libraries: List[str] = field(default_factory=list)
+    runtime: dict[str, str] = field(default_factory=dict)
+    driver_info: dict[str, str] = field(default_factory=dict)
+    jobs: list[Job] = field(default_factory=list)
+    libraries: list[str] = field(default_factory=list)
     log_path: str = ""
     log_text: str = ""
     queue_text: str = ""
-    error: Optional[str] = None
+    error: str | None = None
     #: True when this snapshot carried a live S3 recount
     counts_are_live: bool = False
 
@@ -165,19 +164,19 @@ class Snapshot:
             return "STOPPING"
         return "RUNNING"
 
-    def counts(self) -> Dict[str, int]:
-        out: Dict[str, int] = {}
+    def counts(self) -> dict[str, int]:
+        out: dict[str, int] = {}
         for job in self.jobs:
             out[job.status] = out.get(job.status, 0) + 1
         return out
 
-    def running_job(self) -> Optional[Job]:
+    def running_job(self) -> Job | None:
         for job in self.jobs:
             if job.is_running:
                 return job
         return None
 
-    def find(self, model: str) -> Optional[Job]:
+    def find(self, model: str) -> Job | None:
         """First job with this model id. Ambiguous when a model is queued against
         several libraries — prefer :meth:`find_by_key` wherever identity matters."""
         for job in self.jobs:
@@ -185,7 +184,7 @@ class Snapshot:
                 return job
         return None
 
-    def find_by_key(self, key: str) -> Optional[Job]:
+    def find_by_key(self, key: str) -> Job | None:
         """The one job with this `model|mode|library`."""
         for job in self.jobs:
             if job.key == key:
@@ -201,15 +200,15 @@ class Snapshot:
 # ---------------------------------------------------------------------------
 
 
-def split_sections(text: str) -> Dict[str, List[str]]:
+def split_sections(text: str) -> dict[str, list[str]]:
     """Split a dump blob into ``{section_name: [lines]}``.
 
     Section headers look like ``---8<--- state.tsv`` or ``---8<--- log /path``.
     Anything before the first marker is ignored, which is what makes this
     tolerant of an SSH banner or a stray warning on stdout.
     """
-    sections: Dict[str, List[str]] = {}
-    current: Optional[str] = None
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
     for line in text.splitlines():
         if line.startswith(SECTION_MARKER):
             header = line[len(SECTION_MARKER) :].strip()
@@ -225,8 +224,8 @@ def split_sections(text: str) -> Dict[str, List[str]]:
     return sections
 
 
-def _parse_kv(lines: List[str]) -> Dict[str, str]:
-    out: Dict[str, str] = {}
+def _parse_kv(lines: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
     for line in lines:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -236,7 +235,7 @@ def _parse_kv(lines: List[str]) -> Dict[str, str]:
     return out
 
 
-def _parse_status_tsv(lines: List[str]) -> Dict[str, Dict[str, str]]:
+def _parse_status_tsv(lines: list[str]) -> dict[str, dict[str, str]]:
     """status.tsv -> {key: {status, done, total, started, finished, log, note}}.
 
     ``log`` and ``note`` are written as ``-`` on disk when empty
@@ -246,7 +245,7 @@ def _parse_status_tsv(lines: List[str]) -> Dict[str, Dict[str, str]]:
     mirroring what ``status_load`` does on the bash side.
     """
     cols = ["status", "done", "total", "started", "finished", "log", "note"]
-    out: Dict[str, Dict[str, str]] = {}
+    out: dict[str, dict[str, str]] = {}
     for line in lines:
         if not line or line.startswith("#"):
             continue
@@ -266,7 +265,7 @@ def _parse_status_tsv(lines: List[str]) -> Dict[str, Dict[str, str]]:
     return out
 
 
-def _parse_state_tsv(lines: List[str]) -> Dict[str, Dict[str, str]]:
+def _parse_state_tsv(lines: list[str]) -> dict[str, dict[str, str]]:
     """state.tsv -> {model: row}. Fallback for entries missing from status.tsv."""
     cols = [
         "idx",
@@ -280,7 +279,7 @@ def _parse_state_tsv(lines: List[str]) -> Dict[str, Dict[str, str]]:
         "finished",
         "log",
     ]
-    out: Dict[str, Dict[str, str]] = {}
+    out: dict[str, dict[str, str]] = {}
     for line in lines:
         if not line or line.startswith("#"):
             continue
@@ -326,8 +325,8 @@ def parse_queue_line(raw: str):
         return None
     tokens = stripped.split()
     model = tokens[0]
-    positional: List[str] = []
-    flags: List[str] = []
+    positional: list[str] = []
+    flags: list[str] = []
     for token in tokens[1:]:
         if is_queue_flag(token):
             flags.append(token)
@@ -340,7 +339,7 @@ def parse_queue_line(raw: str):
     return model, mode, library, wave, queue, " ".join(flags)
 
 
-def _read_jobs(sections: Dict[str, List[str]], default_library: str) -> List[Job]:
+def _read_jobs(sections: dict[str, list[str]], default_library: str) -> list[Job]:
     """Jobs in queue order.
 
     Prefers the ``jobs`` section, which ctl produces with library aliases already
@@ -352,7 +351,7 @@ def _read_jobs(sections: Dict[str, List[str]], default_library: str) -> List[Job
     """
     rows = sections.get("jobs")
     if rows:
-        jobs: List[Job] = []
+        jobs: list[Job] = []
         for line in rows:
             if not line or line.startswith("#"):
                 continue
@@ -422,13 +421,13 @@ def flag_value(flags: str, key: str) -> str:
     return ""
 
 
-def _parse_counts(lines: List[str]) -> Dict[str, Dict[str, Optional[int]]]:
+def _parse_counts(lines: list[str]) -> dict[str, dict[str, int | None]]:
     """counts section -> {key: {"done": int|None, "total": int|None}}.
 
     A blank done field means ctl did not recount that row, so the recorded value
     must be kept rather than overwritten with a zero.
     """
-    out: Dict[str, Dict[str, Optional[int]]] = {}
+    out: dict[str, dict[str, int | None]] = {}
     for line in lines:
         if not line or line.startswith("#"):
             continue
@@ -443,7 +442,7 @@ def _parse_counts(lines: List[str]) -> Dict[str, Dict[str, Optional[int]]]:
     return out
 
 
-def harvest_counts(snap: Snapshot, cache: Dict[str, Dict[str, int]]) -> None:
+def harvest_counts(snap: Snapshot, cache: dict[str, dict[str, int]]) -> None:
     """Remember the live counts from this snapshot, keyed by job.
 
     The cheap 2-second refresh carries no counts at all, so without a cache the
@@ -458,7 +457,7 @@ def harvest_counts(snap: Snapshot, cache: Dict[str, Dict[str, int]]) -> None:
             entry["done"] = job.done
 
 
-def apply_cached_counts(snap: Snapshot, cache: Dict[str, Dict[str, int]]) -> None:
+def apply_cached_counts(snap: Snapshot, cache: dict[str, dict[str, int]]) -> None:
     """Fill in counts this snapshot lacks from previously seen live values.
 
     Totals are safe to reuse outright — a library's chunk count does not change.

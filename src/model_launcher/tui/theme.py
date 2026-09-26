@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, Tuple
 
 from textual.theme import Theme
 
@@ -41,7 +40,7 @@ from textual.theme import Theme
 # The official Ersilia palette, imported so the dashboard and the CLI cannot
 # drift apart. See ``model_launcher.branding`` for the values themselves.
 # ---------------------------------------------------------------------------
-from ..branding import (  # noqa: E402
+from ..branding import (
     BLUE,
     MINT,
     ORANGE,
@@ -117,7 +116,7 @@ LIGHT_THEME = ERSILIA_LIGHT.name
 # double-width in some terminals and single in others, which silently shifts
 # every column after it out of line.
 
-_DARK_STATUS: Dict[str, Tuple[str, str]] = {
+_DARK_STATUS: dict[str, tuple[str, str]] = {
     "running": (BLUE, "●"),  # the one bright cool — draws the eye
     "pending": ("#9A9A98", "○"),  # SHADE of Gray: waiting is not news
     "done": (MINT, "✓"),  # finished
@@ -129,7 +128,7 @@ _DARK_STATUS: Dict[str, Tuple[str, str]] = {
     "stale": (PURPLE, "?"),  # claims to be running, but no live driver
 }
 
-_LIGHT_STATUS: Dict[str, Tuple[str, str]] = {
+_LIGHT_STATUS: dict[str, tuple[str, str]] = {
     # All shades: the brand secondaries are far too light to read on white.
     "running": ("#2F7FC4", "●"),  # SHADE of Blue
     "pending": ("#77776F", "○"),  # SHADE of Gray
@@ -173,9 +172,9 @@ class Tokens:
     live: str
     band: str
     band_muted: str
-    status: Dict[str, Tuple[str, str]] = field(default_factory=dict)
+    status: dict[str, tuple[str, str]] = field(default_factory=dict)
 
-    def status_style(self, status: str) -> Tuple[str, str]:
+    def status_style(self, status: str) -> tuple[str, str]:
         """(colour, glyph) for a job status."""
         return self.status.get(status, _FALLBACK)
 

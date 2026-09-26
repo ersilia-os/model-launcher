@@ -56,4 +56,4 @@ def _build() -> _Logger:
 
 logger = _build()
 
-__all__ = ["logger", "SUCCESS"]
+__all__ = ["SUCCESS", "logger"]

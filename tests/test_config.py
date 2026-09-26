@@ -35,7 +35,13 @@ def _dump_without_env(scheduler, unset=(), **overrides):
         "dump",
     ]
     proc = subprocess.run(
-        argv, capture_output=True, text=True, env=env, cwd=scheduler.root, timeout=30
+        argv,
+        capture_output=True,
+        check=False,
+        text=True,
+        env=env,
+        cwd=scheduler.root,
+        timeout=30,
     )
     return parse_dump(proc.stdout)
 
@@ -94,7 +100,13 @@ def test_cli_flag_beats_everything(scheduler):
     ]
     env = scheduler.env(SCHEDULER_CONF=str(scheduler.root / "scheduler.conf"))
     proc = subprocess.run(
-        argv, capture_output=True, text=True, env=env, cwd=scheduler.root, timeout=30
+        argv,
+        capture_output=True,
+        check=False,
+        text=True,
+        env=env,
+        cwd=scheduler.root,
+        timeout=30,
     )
     snap = parse_dump(proc.stdout)
     assert snap.runtime["log_dir"] == str(other_dir)

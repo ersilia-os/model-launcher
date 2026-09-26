@@ -10,17 +10,19 @@ from __future__ import annotations
 
 import io
 import time
+from typing import ClassVar
 
 import click
 import pytest
 
-from model_launcher.core import target as target_mod
 from model_launcher.cli.target import resolve_target
+from model_launcher.core import target as target_mod
 from model_launcher.core.discover import Driver, discover_drivers
 from model_launcher.core.remote import ctl_path
 from model_launcher.core.runner import LocalRunner
 
 
+@pytest.mark.linux_only
 def test_probe_finds_each_running_driver_by_its_log_dir(running_scheduler, tmp_path):
     """Two instances on one machine are two results, each with its own LOG_DIR."""
     scheduler = running_scheduler
@@ -40,15 +42,15 @@ def test_probe_finds_each_running_driver_by_its_log_dir(running_scheduler, tmp_p
     assert found[str(other_log_dir)].pid == scheduler._drivers[1].pid
 
 
-OBJ = dict(
-    host="fakehost",
-    ctl=None,
-    log_dir=None,
-    queue_file=None,
-    s3_bucket=None,
-    ssh_opts=[],
-    who="tester",
-)
+OBJ = {
+    "host": "fakehost",
+    "ctl": None,
+    "log_dir": None,
+    "queue_file": None,
+    "s3_bucket": None,
+    "ssh_opts": [],
+    "who": "tester",
+}
 PROD = Driver(pid=11, log_dir="/shared/logs/scheduler", ctl="/srv/a/sched-ctl.sh")
 TEST = Driver(pid=22, log_dir="/tmp/schedtest", ctl="/srv/a/sched-ctl.sh")
 
@@ -61,7 +63,7 @@ def drivers(monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO())  # no terminal to prompt on
 
     class Running:
-        running: list = []
+        running: ClassVar[list] = []
 
     monkeypatch.setattr(target_mod, "discover_drivers", lambda _r: Running.running)
     return Running

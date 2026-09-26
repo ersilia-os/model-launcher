@@ -6,8 +6,6 @@ stay testable without a console attached.
 
 from __future__ import annotations
 
-from typing import List
-
 from rich.box import SIMPLE_HEAD
 from rich.table import Table
 from rich.text import Text
@@ -46,7 +44,7 @@ def summary_table() -> Table:
     return table
 
 
-def targets_table(targets: List[Target]) -> Table:
+def targets_table(targets: list[Target]) -> Table:
     """Render discovered machines as a table."""
     table = Table(
         box=SIMPLE_HEAD,

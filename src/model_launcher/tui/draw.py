@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Dict, List, Optional, Sequence, Tuple
 
 from rich.style import Style
 from rich.text import Text
@@ -106,7 +106,7 @@ def pct_fine(done: int, total: int) -> str:
     return f"{value:.1f}%"
 
 
-def split_log_line(line: str) -> Tuple[str, str]:
+def split_log_line(line: str) -> tuple[str, str]:
     """``[2026-09-25T14:02:11Z] msg`` → ``("14:02:11", "msg")``; ``("", line)`` otherwise."""
     match = _LOG_STAMP.match(line)
     if not match:
@@ -209,7 +209,7 @@ class Canvas:
         if title:
             self.put(x + 2, y, title, title_fg or fg, bg, bold=True)
 
-    def lines(self) -> List[Text]:
+    def lines(self) -> list[Text]:
         """One ``Text`` per row, with runs of identical style merged."""
         out = []
         for row in self.cells:
@@ -273,7 +273,7 @@ def band(
     width: int,
     t: Tokens,
     host: str = "",
-    snap: Optional[Snapshot] = None,
+    snap: Snapshot | None = None,
     right: str = "",
 ) -> Text:
     """Row 0: the plum brand band. ``right`` replaces the scheduler summary."""
@@ -288,7 +288,7 @@ def band(
         colour = BLUE if snap.driver_alive and not snap.paused else YELLOW
         if not snap.driver_alive:
             colour = t.band_muted
-        parts: List[Tuple[str, str, bool]] = [(host, WHITE, True)]
+        parts: list[tuple[str, str, bool]] = [(host, WHITE, True)]
         parts.append((f"{glyph} {state}", colour, True))
         if snap.runtime.get("dry_run") == "1" or snap.driver_info.get("dry_run") == "1":
             parts.append(("DRY-RUN", YELLOW, True))
@@ -310,7 +310,7 @@ def band(
     return cv.lines()[0]
 
 
-def context_line(width: int, t: Tokens, pairs: Sequence[Tuple[str, str]]) -> Text:
+def context_line(width: int, t: Tokens, pairs: Sequence[tuple[str, str]]) -> Text:
     """Row 1: ``key value`` groups, muted key and plain value, three spaces apart."""
     cv = Canvas(width, 1, t)
     x = 1
@@ -321,24 +321,58 @@ def context_line(width: int, t: Tokens, pairs: Sequence[Tuple[str, str]]) -> Tex
     return cv.lines()[0]
 
 
-def footer(width: int, t: Tokens, groups: Sequence[Sequence[Tuple[str, str]]]) -> Text:
-    """The last row: bold keys, muted descriptions, groups split by ``│``."""
+#: (start column, end column, key) of each clickable key hint on one row.
+Spans = list[tuple[int, int, str]]
+
+
+def key_hints(
+    cv: Canvas, x: int, y: int, items: Sequence[tuple[str, str]], gap: str
+) -> tuple[int, Spans]:
+    """Draw ``key desc`` pairs from column ``x``; return the next column and spans.
+
+    Each span covers a key and its description, not the gap after it. A
+    combined key such as ``K/J`` gets one span per key, the last one running
+    on through the description, so each half can be clicked on its own.
+    """
+    spans: Spans = []
+    for key, desc in items:
+        start = x
+        x = cv.put(x, y, key, cv.t.primary, bold=True)
+        x = cv.put(x, y, f" {desc}{gap}", cv.t.muted)
+        parts = key.split("/")
+        for i, part in enumerate(parts):
+            end = start + len(part) if i < len(parts) - 1 else x - len(gap)
+            spans.append((start, end, part))
+            start = end + 1
+    return x, spans
+
+
+def footer(
+    width: int, t: Tokens, groups: Sequence[Sequence[tuple[str, str]]]
+) -> tuple[Text, Spans]:
+    """The last row (bold keys, muted descriptions, groups split by ``│``) and
+    the column span of each key for click-to-run."""
     cv = Canvas(width, 1, t, bg=t.panel)
     x = 1
+    spans: Spans = []
     for gi, group in enumerate(groups):
-        for key, desc in group:
-            x = cv.put(x, 0, key, t.primary, bold=True)
-            x = cv.put(x, 0, f" {desc}  ", t.muted)
+        x, group_spans = key_hints(cv, x, 0, group, "  ")
+        spans += group_spans
         if gi < len(groups) - 1:
             x = cv.put(x, 0, "│  ", t.track)
-    return cv.lines()[0]
+    return cv.lines()[0], spans
 
 
 # ---------------------------------------------------------------------------
 # dashboard
 # ---------------------------------------------------------------------------
-def running_card(width: int, t: Tokens, snap: Snapshot) -> List[Text]:
-    """The five-row NOW RUNNING card (or an idle card when nothing runs)."""
+#: Row of the running card that carries its key hints.
+CARD_HINT_ROW = 3
+
+
+def running_card(width: int, t: Tokens, snap: Snapshot) -> tuple[list[Text], Spans]:
+    """The five-row NOW RUNNING card (or an idle card when nothing runs), and
+    the spans of the key hints on its :data:`CARD_HINT_ROW`."""
     cv = Canvas(width, 5, t)
     job = snap.running_job()
     if job is None:
@@ -350,11 +384,9 @@ def running_card(width: int, t: Tokens, snap: Snapshot) -> List[Text]:
         x = cv.put(4, 1, state.capitalize(), t.fg, bold=True)
         cv.put(x + 2, 1, f"{waiting} pending", t.muted)
         bar(cv, 4, 2, width - 16, 0, 0, t.live, none="░")
-        x = width - 40
-        for key, desc in (("a", "add"), ("t", "run next"), ("p", "pause")):
-            x = cv.put(x, 3, key, t.primary, bold=True)
-            x = cv.put(x, 3, f" {desc}   ", t.muted)
-        return cv.lines()
+        hints = (("a", "add"), ("t", "run next"), ("p", "pause"))
+        _, spans = key_hints(cv, width - 40, CARD_HINT_ROW, hints, "   ")
+        return cv.lines(), spans
 
     cv.box(
         1,
@@ -384,23 +416,21 @@ def running_card(width: int, t: Tokens, snap: Snapshot) -> List[Text]:
         cv.put(x, 3, f"{num(max(0, job.total - job.done))} remaining", t.muted)
     else:
         cv.put(4, 3, "counting chunks…", t.muted)
-    x = width - 40
-    for key, desc in (("l", "log"), ("c", "cancel"), ("s", "stop after")):
-        x = cv.put(x, 3, key, t.primary, bold=True)
-        x = cv.put(x, 3, f" {desc}   ", t.muted)
-    return cv.lines()
+    hints = (("l", "log"), ("c", "cancel"), ("s", "stop after"))
+    _, spans = key_hints(cv, width - 40, CARD_HINT_ROW, hints, "   ")
+    return cv.lines(), spans
 
 
 def summary_line(
-    width: int, t: Tokens, counts: Dict[str, int], active: Optional[str]
-) -> Tuple[Text, List[Tuple[int, int, Optional[str]]]]:
+    width: int, t: Tokens, counts: dict[str, int], active: str | None
+) -> tuple[Text, list[tuple[int, int, str | None]]]:
     """The status summary, and the column span of each entry for click-to-filter.
 
     ``active`` is the status currently filtered on (None = all); it is the one
     drawn as the inverted pill.
     """
     cv = Canvas(width, 1, t)
-    spans: List[Tuple[int, int, Optional[str]]] = []
+    spans: list[tuple[int, int, str | None]] = []
     label = f" all {sum(counts.values())} "
     if active is None:
         end = cv.put(2, 0, label, t.bg, t.primary, bold=True)
@@ -479,7 +509,7 @@ def columns(width: int) -> Columns:
     return Columns(width=width, library_width=library, bar_width=bars)
 
 
-def table_header(cols: Columns, t: Tokens) -> List[Text]:
+def table_header(cols: Columns, t: Tokens) -> list[Text]:
     """The column headings and the rule under them."""
     cv = Canvas(cols.width, 2, t)
     for x, label in (
@@ -563,8 +593,9 @@ def log_drawer(
     follow: bool,
     lines: Sequence[str],
     placeholder: str = "",
-) -> List[Text]:
-    """The log drawer: a rounded box with timestamp and message columns.
+) -> tuple[list[Text], Spans]:
+    """The log drawer: a rounded box with timestamp and message columns, and
+    the span of the follow toggle on its top row.
 
     ``lines`` are the ones to show, already scrolled; at most ``height - 4`` fit.
     """
@@ -578,13 +609,14 @@ def log_drawer(
         title=f" log · {model or '—'} ",
         title_fg=t.primary,
     )
-    x = width - 24
+    start = x = width - 24
     if follow:
         x = cv.put(x, 0, " ● ", t.live)
         cv.put(x, 0, "following · f ", t.muted)
     else:
         x = cv.put(x, 0, " ○ ", t.muted)
         cv.put(x, 0, "frozen · f    ", t.muted)
+    spans: Spans = [(start, start + len(" ● following · f "), "f")]
 
     stamp_fg = mix(t.muted, t.bg, 0.35)
     room = height - 4
@@ -606,4 +638,4 @@ def log_drawer(
         "drag ─ or  +/-  to resize   ·   esc close",
         mix(t.muted, t.bg, 0.3),
     )
-    return cv.lines()
+    return cv.lines(), spans

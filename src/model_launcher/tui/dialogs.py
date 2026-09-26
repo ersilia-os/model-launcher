@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import ClassVar
 
 from textual.app import ComposeResult
+from textual.binding import BindingType
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Label, Select, Static
@@ -12,14 +13,14 @@ from textual.widgets import Button, Checkbox, Input, Label, Select, Static
 MODES = ["ersilia", "singularity"]
 
 
-class AddScreen(ModalScreen[Optional[dict]]):
+class AddScreen(ModalScreen[dict | None]):
     """Collect a new queue entry. Returns a dict, or None if cancelled."""
 
-    BINDINGS = [("escape", "dismiss_none", "Cancel")]
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "dismiss_none", "Cancel")]
 
     def __init__(
         self,
-        libraries: List[str],
+        libraries: list[str],
         default_library: str = "",
         max_cpus: int = 32,
     ) -> None:
@@ -138,7 +139,7 @@ class AddScreen(ModalScreen[Optional[dict]]):
 class ConfirmScreen(ModalScreen[bool]):
     """Confirm a destructive verb. Spells out exactly what will happen."""
 
-    BINDINGS = [("escape", "dismiss_false", "Cancel")]
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "dismiss_false", "Cancel")]
 
     def __init__(self, title: str, detail: str, ok_label: str = "Confirm") -> None:
         super().__init__()

@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import socket
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import ClassVar
 
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
+from textual.binding import BindingType
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
@@ -34,14 +35,14 @@ class HostRow:
     """One machine in the picker."""
 
     key: str
-    host: Optional[str]  # SSH alias; None = this machine
+    host: str | None  # SSH alias; None = this machine
     name: str
     via: str
     detail: str = ""
     reachable: bool = True
 
 
-def host_rows() -> List[HostRow]:
+def host_rows() -> list[HostRow]:
     """This machine first, then every ``--list-hosts`` target.
 
     The tailnet lists this machine too; that row is dropped so it does not
@@ -64,7 +65,7 @@ def host_rows() -> List[HostRow]:
     return rows
 
 
-class HostScreen(ModalScreen[Optional[Resolution]]):
+class HostScreen(ModalScreen[Resolution | None]):
     """Pick a machine. Returns a :class:`Resolution`, or None if cancelled.
 
     Parameters
@@ -76,16 +77,16 @@ class HostScreen(ModalScreen[Optional[Resolution]]):
         Key of the host already connected, marked in the list.
     """
 
-    BINDINGS = [("escape", "dismiss_none", "Cancel")]
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "dismiss_none", "Cancel")]
 
-    def __init__(self, options: dict, current: Optional[str] = None) -> None:
+    def __init__(self, options: dict, current: str | None = None) -> None:
         super().__init__()
         self.options = options
         self.current = current
-        self.rows: Dict[str, HostRow] = {}
-        self.status: Dict[str, str] = {}
-        self._drivers: List[Driver] = []
-        self._driver_host: Optional[HostRow] = None
+        self.rows: dict[str, HostRow] = {}
+        self.status: dict[str, str] = {}
+        self._drivers: list[Driver] = []
+        self._driver_host: HostRow | None = None
         self._busy = False
 
     def compose(self) -> ComposeResult:
@@ -103,7 +104,7 @@ class HostScreen(ModalScreen[Optional[Resolution]]):
         rows = host_rows()
         self.app.call_from_thread(self._show_rows, rows)
 
-    def _show_rows(self, rows: List[HostRow]) -> None:
+    def _show_rows(self, rows: list[HostRow]) -> None:
         self.rows = {row.key: row for row in rows}
         for row in rows:
             self.status[row.key] = "checking…" if row.reachable else "offline"
@@ -163,7 +164,7 @@ class HostScreen(ModalScreen[Optional[Resolution]]):
         self._hint(f"connecting to {row.name}…")
         self.run_worker(lambda: self._resolve(row), thread=True, group="resolve")
 
-    def _options_for(self, row: Optional[HostRow]) -> dict:
+    def _options_for(self, row: HostRow | None) -> dict:
         return {**self.options, "host": (row.host if row else None) or ""}
 
     def _resolve(self, row: HostRow) -> None:

@@ -14,15 +14,13 @@ from __future__ import annotations
 
 import os
 import socket
-from typing import List, Optional
+from typing import ClassVar
 
 from textual import on, work
 from textual.app import App, ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.reactive import reactive
 
-from .dialogs import AddScreen, ConfirmScreen
-from .hosts import HostScreen
 from ..core.hosts import LOCAL, save_last_host
 from ..core.model import (
     Job,
@@ -34,12 +32,15 @@ from ..core.model import (
 from ..core.runner import Runner, RunnerError
 from ..core.target import Resolution
 from . import draw
+from .dialogs import AddScreen, ConfirmScreen
+from .hosts import HostScreen
 from .theme import DARK_THEME, LIGHT_THEME, THEMES, Tokens, tokens
 from .widgets import (
     Band,
     Banner,
     ContextLine,
     ContextMenu,
+    HintClicked,
     KeyFooter,
     LogDrawer,
     QueueHeader,
@@ -70,7 +71,7 @@ class SchedulerTUI(App):
 
     # The footer is drawn by KeyFooter from draw.DASHBOARD_KEYS, not from these,
     # so `show` is irrelevant; every binding still appears in the command palette.
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("a", "add", "add"),
         Binding("x", "remove", "remove"),
         Binding("t", "top", "run next"),
@@ -93,6 +94,25 @@ class SchedulerTUI(App):
         Binding("q", "quit", "quit"),
     ]
 
+    #: What a clicked key hint runs, by the key it shows (see draw.key_hints).
+    HINT_ACTIONS: ClassVar[dict[str, str]] = {
+        "a": "add",
+        "x": "remove",
+        "t": "top",
+        "K": "move_up",
+        "J": "move_down",
+        "h": "hold",
+        "r": "retry",
+        "c": "cancel",
+        "p": "pause",
+        "l": "toggle_log",
+        "^o": "switch_host",
+        "s": "stop_after",
+        "f": "toggle_follow",
+        "D": "toggle_dark_theme",
+        "q": "quit",
+    }
+
     show_log: reactive[bool] = reactive(False)
     follow_log: reactive[bool] = reactive(True)
 
@@ -103,17 +123,17 @@ class SchedulerTUI(App):
 
     def __init__(
         self,
-        runner: Optional[Runner],
+        runner: Runner | None,
         refresh_interval: float = 2.0,
         live_interval: float = 60.0,
         start_theme: str = DARK_THEME,
-        options: Optional[dict] = None,
+        options: dict | None = None,
     ) -> None:
         super().__init__()
         #: None until a host is picked (the dashboard was opened without --host).
         self.runner = runner
         self._options = dict(options or {})
-        self._host_key: Optional[str] = None
+        self._host_key: str | None = None
         if runner is not None:
             self._host_key = getattr(runner, "host", "") or LOCAL
         self.refresh_interval = refresh_interval
@@ -130,13 +150,13 @@ class SchedulerTUI(App):
         #: last known live S3 counts, {job key: {done, total}}
         self._count_cache: dict = {}
         self.snapshot: Snapshot = Snapshot()
-        self.filter_status: Optional[str] = None
-        self._log_model: Optional[str] = None
+        self.filter_status: str | None = None
+        self._log_model: str | None = None
         #: (job key, lines) last shown in the drawer; frozen while follow is off
-        self._log_shown: Optional[tuple] = None
+        self._log_shown: tuple | None = None
         self._log_height = 14
         self._dark = True
-        self._menu: Optional[ContextMenu] = None
+        self._menu: ContextMenu | None = None
 
     @property
     def tokens(self) -> Tokens:
@@ -223,7 +243,7 @@ class SchedulerTUI(App):
         snapshot = parse_dump(text)
         self.call_from_thread(self._on_snapshot, snapshot, runner)
 
-    def _log_path_for_request(self) -> Optional[str]:
+    def _log_path_for_request(self) -> str | None:
         """Ask for a log tail only when the pane is open — a 300-line tail per
         tick is wasted bytes over SSH when nobody is looking at it."""
         if not self.show_log:
@@ -287,7 +307,7 @@ class SchedulerTUI(App):
     # ------------------------------------------------------------------
     # rendering
     # ------------------------------------------------------------------
-    def _render_banner(self, message: Optional[str], error: bool = False) -> None:
+    def _render_banner(self, message: str | None, error: bool = False) -> None:
         self.query_one("#banner", Banner).show(message or "", error)
 
     def _host_label(self) -> str:
@@ -320,7 +340,7 @@ class SchedulerTUI(App):
             self.snapshot.counts(), self.filter_status
         )
 
-    def visible_jobs(self) -> List[Job]:
+    def visible_jobs(self) -> list[Job]:
         if self.filter_status is None:
             return self.snapshot.jobs
         return [j for j in self.snapshot.jobs if j.status == self.filter_status]
@@ -383,7 +403,7 @@ class SchedulerTUI(App):
     # selection helpers
     # ------------------------------------------------------------------
     @property
-    def selected(self) -> Optional[Job]:
+    def selected(self) -> Job | None:
         key = self.query_one("#table", QueueView).selected_key
         if not key:
             return None
@@ -401,7 +421,7 @@ class SchedulerTUI(App):
             return str(job.pos)
         return job.model
 
-    def _need_selection(self) -> Optional[Job]:
+    def _need_selection(self) -> Job | None:
         job = self.selected
         if job is None:
             self.notify(
@@ -415,7 +435,7 @@ class SchedulerTUI(App):
     def action_add(self) -> None:
         snap = self.snapshot
 
-        def on_close(result: Optional[dict]) -> None:
+        def on_close(result: dict | None) -> None:
             if not result:
                 return
             args = ["add", result["model"], result["mode"]]
@@ -594,7 +614,7 @@ class SchedulerTUI(App):
     def _pick_host(self, initial: bool) -> None:
         """Open the host picker. Cancelled at startup, there is nothing to show."""
 
-        def on_close(resolution: Optional[Resolution]) -> None:
+        def on_close(resolution: Resolution | None) -> None:
             if resolution is not None and resolution.runner is not None:
                 self._connect(resolution)
             elif self.runner is None:
@@ -667,6 +687,12 @@ class SchedulerTUI(App):
     # ------------------------------------------------------------------
     # widget messages
     # ------------------------------------------------------------------
+    @on(HintClicked)
+    async def _on_hint(self, event: HintClicked) -> None:
+        action = self.HINT_ACTIONS.get(event.key)
+        if action:
+            await self.run_action(action)
+
     @on(StatusSummary.Toggled)
     def _on_filter(self, event: StatusSummary.Toggled) -> None:
         self.filter_status = event.status

@@ -22,7 +22,6 @@ from model_launcher.core.remote import remote_dir
 
 from .conftest import bash_eval
 
-
 # --- 1. the queue file is the source of truth, line order IS priority --------
 
 
@@ -86,6 +85,7 @@ def test_inv02_hold_does_outrank_pending(scheduler):
 # --- 3. control messages are drained at startup, not just in the loop -------
 
 
+@pytest.mark.linux_only
 def test_inv03_stale_shutdown_is_discarded_at_startup(scheduler):
     """A `shutdown` left over from a previous driver must not kill the next one.
 
@@ -146,6 +146,7 @@ def test_inv03_a_command_posted_the_instant_driver_info_appears_is_never_discard
 # --- 4. kill the orchestrator BEFORE scancel --------------------------------
 
 
+@pytest.mark.linux_only
 def test_inv04_orchestrator_is_dead_before_scancel_runs(scheduler):
     """Reverse this order and cancelling a wave spawns a fresh one.
 
@@ -186,6 +187,7 @@ def test_inv04_orchestrator_is_dead_before_scancel_runs(scheduler):
 # --- 5. the driver must kill its orchestrator on exit -----------------------
 
 
+@pytest.mark.linux_only
 def test_inv05_driver_takes_the_orchestrator_down_with_it(scheduler):
     """An orphaned orchestrator keeps submitting waves.
 
@@ -343,6 +345,7 @@ def test_inv09_retry_clears_the_stored_verdict(scheduler):
     assert scheduler.dump().find("eos_x").status == "pending"
 
 
+@pytest.mark.linux_only
 def test_inv09_a_running_driver_honours_retry(scheduler):
     """`retry` must reach a LIVE driver, not just a fresh ctl process.
 
@@ -447,6 +450,7 @@ def test_inv10_comments_travel_with_their_job(scheduler):
 # --- 11. the client never calls AWS -----------------------------------------
 
 
+@pytest.mark.linux_only
 def test_inv11_plain_dump_never_counts_progress_from_s3(scheduler):
     """The 2s refresh tick must not recount progress, or the dashboard costs money and time.
 
@@ -548,6 +552,7 @@ def test_inv13_invalid_cpus_is_skipped_not_dispatched(scheduler):
 # --- 14. stale `running` rows get reclaimed at startup ----------------------
 
 
+@pytest.mark.linux_only
 def test_inv14_interrupted_job_is_reclaimed(scheduler):
     """A driver that died mid-job leaves a row marked `running`.
 
@@ -626,6 +631,7 @@ def test_unknown_mode_is_skipped_with_a_reason(scheduler):
     assert scheduler.dump().find("eos_x").note == ""  # see docstring
 
 
+@pytest.mark.linux_only
 def test_pause_stops_new_jobs_starting(scheduler):
     """`pause` is a sticky flag: the driver finishes nothing new while it is set."""
     scheduler.write_queue("eos_x ersilia testlib")

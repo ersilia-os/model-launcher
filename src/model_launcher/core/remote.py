@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import List
 
 #: Basename of the control CLI — the only server-side entry point the client uses.
 CTL_NAME = "sched-ctl.sh"
@@ -43,7 +42,7 @@ def ctl_path() -> Path:
     return remote_dir() / CTL_NAME
 
 
-def payload_files() -> List[Path]:
+def payload_files() -> list[Path]:
     """List every file that makes up the deployable bash layer.
 
     Returns

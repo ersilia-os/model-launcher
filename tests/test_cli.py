@@ -16,6 +16,7 @@ def _run(scheduler, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["model-launcher", *args],
         capture_output=True,
+        check=False,
         text=True,
         env=scheduler.env(),
         timeout=60,

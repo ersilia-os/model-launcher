@@ -15,9 +15,9 @@ import glob
 import json
 import os
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Set
 
 #: Depth limit for ``Include`` chains, so a cyclic include cannot hang the CLI.
 MAX_INCLUDE_DEPTH = 8
@@ -36,8 +36,8 @@ class SshHost:
     """One connectable alias from the SSH configuration."""
 
     alias: str
-    hostname: Optional[str] = None
-    user: Optional[str] = None
+    hostname: str | None = None
+    user: str | None = None
 
     @property
     def target(self) -> str:
@@ -56,7 +56,7 @@ def _is_pattern(alias: str) -> bool:
     return any(char in alias for char in "*?!")
 
 
-def _resolve_include(argument: str, base: Path) -> List[Path]:
+def _resolve_include(argument: str, base: Path) -> list[Path]:
     """Expand one ``Include`` argument into concrete files.
 
     Relative paths are resolved against ``~/.ssh``, as ``ssh`` itself does.
@@ -67,7 +67,7 @@ def _resolve_include(argument: str, base: Path) -> List[Path]:
     return [Path(match) for match in sorted(glob.glob(expanded))]
 
 
-def parse_ssh_config(path: Optional[Path] = None, _depth: int = 0) -> List[SshHost]:
+def parse_ssh_config(path: Path | None = None, _depth: int = 0) -> list[SshHost]:
     """Parse an SSH config file into its connectable host entries.
 
     Parameters
@@ -93,11 +93,11 @@ def parse_ssh_config(path: Optional[Path] = None, _depth: int = 0) -> List[SshHo
         return []
 
     base = path.parent
-    hosts: List[SshHost] = []
-    seen: Set[str] = set()
-    aliases: List[str] = []
-    hostname: Optional[str] = None
-    user: Optional[str] = None
+    hosts: list[SshHost] = []
+    seen: set[str] = set()
+    aliases: list[str] = []
+    hostname: str | None = None
+    user: str | None = None
 
     def flush() -> None:
         for alias in aliases:
@@ -165,7 +165,7 @@ class TailnetHost:
         return "online" if self.online else "offline"
 
 
-def _tailscale_status_json(timeout: float = TAILSCALE_TIMEOUT) -> Optional[dict]:
+def _tailscale_status_json(timeout: float = TAILSCALE_TIMEOUT) -> dict | None:
     """Return one ``tailscale status --json`` snapshot, or None.
 
     Every failure mode — no Tailscale installed, daemon not running, wedged,
@@ -176,6 +176,7 @@ def _tailscale_status_json(timeout: float = TAILSCALE_TIMEOUT) -> Optional[dict]
         proc = subprocess.run(
             ["tailscale", "status", "--json"],
             capture_output=True,
+            check=False,
             text=True,
             timeout=timeout,
         )
@@ -189,7 +190,7 @@ def _tailscale_status_json(timeout: float = TAILSCALE_TIMEOUT) -> Optional[dict]
         return None
 
 
-def _node_to_host(node: dict, users: dict, is_self: bool) -> Optional[TailnetHost]:
+def _node_to_host(node: dict, users: dict, is_self: bool) -> TailnetHost | None:
     """Convert one Tailscale node to a launch target, or None if it is not one."""
     name = (node.get("HostName") or "") or (node.get("DNSName") or "").split(".")[0]
     if not name:
@@ -230,7 +231,7 @@ def _has_login(host: TailnetHost, self_owner: str) -> bool:
     return bool(self_owner) and host.owner == self_owner
 
 
-def tailnet_hosts(snapshot: Optional[dict] = None) -> List[TailnetHost]:
+def tailnet_hosts(snapshot: dict | None = None) -> list[TailnetHost]:
     """List tailnet devices we can actually launch models on.
 
     Parameters
@@ -252,7 +253,7 @@ def tailnet_hosts(snapshot: Optional[dict] = None) -> List[TailnetHost]:
         return []
 
     users = snapshot.get("User") or {}
-    hosts: List[TailnetHost] = []
+    hosts: list[TailnetHost] = []
 
     own = _node_to_host(snapshot.get("Self") or {}, users, is_self=True)
     if own:
@@ -286,9 +287,9 @@ class Target:
 
 
 def available_targets(
-    ssh: Optional[List[SshHost]] = None,
-    tailnet: Optional[List[TailnetHost]] = None,
-) -> List[Target]:
+    ssh: list[SshHost] | None = None,
+    tailnet: list[TailnetHost] | None = None,
+) -> list[Target]:
     """Merge both sources into one list of things ``--host`` will accept.
 
     A name present in both is reported once, as ``ssh+tailscale``: the SSH entry
@@ -299,8 +300,8 @@ def available_targets(
     tailnet = tailnet_hosts() if tailnet is None else tailnet
 
     by_tailnet = {host.name: host for host in tailnet}
-    targets: List[Target] = []
-    named: Set[str] = set()
+    targets: list[Target] = []
+    named: set[str] = set()
 
     for host in ssh:
         also = host.alias in by_tailnet
@@ -346,7 +347,7 @@ def _last_host_path() -> Path:
     return Path(base) / "model-launcher" / "last-host"
 
 
-def load_last_host() -> Optional[str]:
+def load_last_host() -> str | None:
     """Return the host the dashboard last connected to, if remembered.
 
     Returns
@@ -362,7 +363,7 @@ def load_last_host() -> Optional[str]:
     return name or None
 
 
-def save_last_host(name: Optional[str]) -> None:
+def save_last_host(name: str | None) -> None:
     """Remember ``name`` (None = this machine) as the last-used host.
 
     Best effort: a read-only home directory must not stop the dashboard.

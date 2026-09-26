@@ -8,7 +8,6 @@ when several are running.
 from __future__ import annotations
 
 import sys
-from typing import List
 
 import click
 
@@ -45,7 +44,7 @@ def resolve_target(obj: dict) -> Resolution:
     return resolution
 
 
-def _choose(host: str, drivers: List[Driver]) -> Driver:
+def _choose(host: str, drivers: list[Driver]) -> Driver:
     listing = "\n".join(
         f"  {i}. {d.log_dir}  (pid {d.pid})" for i, d in enumerate(drivers, 1)
     )

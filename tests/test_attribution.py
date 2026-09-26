@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import subprocess
 
+import pytest
+
 from model_launcher.core.remote import remote_dir
 from model_launcher.core.runner import LocalRunner, SshRunner, build_runner
 
@@ -30,7 +32,7 @@ def test_mutating_commands_are_audited(scheduler):
     scheduler.ctl("add", "eos_x", "ersilia", "testlib", SCHED_WHO="ana", check=True)
     lines = _audit_lines(scheduler)
     assert len(lines) == 1
-    ts, who, verb, args = lines[0].split("\t")
+    _ts, who, verb, args = lines[0].split("\t")
     assert who == "ana"
     assert verb == "add"
     assert args == "eos_x ersilia testlib"
@@ -88,6 +90,7 @@ def test_cli_who_flag_beats_sched_who_env(scheduler):
             "pause",
         ],
         capture_output=True,
+        check=False,
         text=True,
         env=scheduler.env(SCHED_WHO="env-loses"),
         cwd=scheduler.root,
@@ -110,6 +113,7 @@ def test_multiple_mutations_append_rather_than_overwrite(scheduler):
 # --- "cancelled by X" ---------------------------------------------------------
 
 
+@pytest.mark.linux_only
 def test_cancel_note_names_who_asked(scheduler):
     scheduler.write_queue("eos_x ersilia testlib")
     scheduler.start_driver()
@@ -122,6 +126,7 @@ def test_cancel_note_names_who_asked(scheduler):
     assert "ana" in note
 
 
+@pytest.mark.linux_only
 def test_cancel_note_has_no_dangling_by_when_who_is_unknown(scheduler):
     """A hand-typed `sched-ctl.sh cancel` with no --who must not produce a note
     like 'cancelled by  at ...' — the placeholder is omitted, not blank."""
@@ -141,6 +146,7 @@ def test_cancel_note_has_no_dangling_by_when_who_is_unknown(scheduler):
             "eos_x",
         ],
         capture_output=True,
+        check=False,
         text=True,
         env={**scheduler.env(), "SCHED_WHO": ""},
         cwd=scheduler.root,
@@ -151,9 +157,10 @@ def test_cancel_note_has_no_dangling_by_when_who_is_unknown(scheduler):
 
     note = scheduler.dump().find("eos_x").note
     assert "by " not in note, note
-    assert note.startswith("cancelled at ") or note.startswith("cancelled by")
+    assert note.startswith(("cancelled at ", "cancelled by"))
 
 
+@pytest.mark.linux_only
 def test_audit_log_records_the_cancel_request_too(scheduler):
     """The cancel note names who asked; the audit log independently confirms
     the command was actually run, at what time."""

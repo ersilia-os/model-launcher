@@ -94,6 +94,7 @@ def test_verification_sentinels_match_the_packaged_files():
         proc = subprocess.run(
             ["grep", "-c", pattern, str(target)],
             capture_output=True,
+            check=False,
             text=True,
         )
         actual = int(proc.stdout.strip() or "0")

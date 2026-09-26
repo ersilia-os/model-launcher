@@ -9,8 +9,8 @@ from __future__ import annotations
 import sys
 
 import click
-from rich_click import RichCommand
 from rich.text import Text
+from rich_click import RichCommand
 
 from ...branding import console
 from ...core.model import parse_dump

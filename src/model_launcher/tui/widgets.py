@@ -7,17 +7,19 @@ into messages. The drawing itself — every column offset and colour — lives i
 
 Mouse and keyboard reach the same actions: click selects a row, double-click
 opens its log, right-click opens the verb menu, clicking a status in the
-summary line filters, and the log drawer's top edge drags to resize.
+summary line filters, clicking a key hint (footer, card, log drawer) runs it,
+and the log drawer's top edge drags to resize.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import ClassVar
 
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Vertical
 from textual.events import (
     Click,
@@ -47,12 +49,22 @@ def _join(lines: Sequence[Text]) -> Text:
     return Text("\n", end="").join(lines)
 
 
+class HintClicked(Message):
+    """A drawn key hint (``a add``, ``f`` …) was clicked; run what its key does."""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__()
+
+
 class Painted(Widget):
     """A region drawn by one ``draw.py`` function.
 
     Subclasses implement :meth:`paint`. :meth:`show` stores new data and
     repaints only if it differs from what is on screen, so a poll that changed
-    nothing redraws nothing.
+    nothing redraws nothing. A subclass that draws key hints records them in
+    ``hints`` as (row, start, end, key), and clicking one posts
+    :class:`HintClicked`.
     """
 
     DEFAULT_CSS = "Painted { height: 1; }"
@@ -60,13 +72,27 @@ class Painted(Widget):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.data: tuple = ()
+        self.hints: list[tuple[int, int, int, str]] = []
+
+    def hint_at(self, x: int, y: int) -> str | None:
+        """The key of the hint drawn at this cell, if any."""
+        for row, start, end, key in self.hints:
+            if row == y and start <= x < end:
+                return key
+        return None
+
+    def on_click(self, event: Click) -> None:
+        key = self.hint_at(event.x, event.y)
+        if key is not None:
+            self.post_message(HintClicked(key))
+            event.stop()
 
     def show(self, *data) -> None:
         if data != self.data:
             self.data = data
             self.refresh()
 
-    def paint(self, width: int, t: Tokens) -> List[Text]:  # pragma: no cover - abstract
+    def paint(self, width: int, t: Tokens) -> list[Text]:  # pragma: no cover - abstract
         raise NotImplementedError
 
     def render(self) -> Text:
@@ -78,7 +104,7 @@ class Painted(Widget):
 class Band(Painted):
     """Row 0: brand band. Data: (host, snapshot) or (right-hand text,)."""
 
-    def paint(self, width: int, t: Tokens) -> List[Text]:
+    def paint(self, width: int, t: Tokens) -> list[Text]:
         if len(self.data) == 1:
             return [draw.band(width, t, right=self.data[0])]
         host, snap = self.data
@@ -88,15 +114,17 @@ class Band(Painted):
 class ContextLine(Painted):
     """Row 1: ``queue … lib … wave … partition …``. Data: (pairs,)."""
 
-    def paint(self, width: int, t: Tokens) -> List[Text]:
+    def paint(self, width: int, t: Tokens) -> list[Text]:
         return [draw.context_line(width, t, self.data[0])]
 
 
 class KeyFooter(Painted):
     """The key hints on the last row. Data: (groups,)."""
 
-    def paint(self, width: int, t: Tokens) -> List[Text]:
-        return [draw.footer(width, t, self.data[0])]
+    def paint(self, width: int, t: Tokens) -> list[Text]:
+        line, spans = draw.footer(width, t, self.data[0])
+        self.hints = [(0, start, end, key) for start, end, key in spans]
+        return [line]
 
 
 class Banner(Painted):
@@ -108,7 +136,7 @@ class Banner(Painted):
 
     DEFAULT_CSS = "Banner { height: auto; min-height: 1; }"
 
-    def paint(self, width: int, t: Tokens) -> List[Text]:
+    def paint(self, width: int, t: Tokens) -> list[Text]:
         message, error = self.data
         if not message:
             return [Text("")]
@@ -124,8 +152,11 @@ class RunningCard(Painted):
 
     DEFAULT_CSS = "RunningCard { height: 5; }"
 
-    def paint(self, width: int, t: Tokens) -> List[Text]:
-        return draw.running_card(width, t, self.data[-1])
+    def paint(self, width: int, t: Tokens) -> list[Text]:
+        lines, spans = draw.running_card(width, t, self.data[-1])
+        row = draw.CARD_HINT_ROW
+        self.hints = [(row, start, end, key) for start, end, key in spans]
+        return lines
 
     def show_snapshot(self, snap: Snapshot) -> None:
         # Compare only what the card draws; the snapshot's log text and the
@@ -149,15 +180,15 @@ class StatusSummary(Painted):
     """``all N`` then one count per status; click one to filter the queue."""
 
     class Toggled(Message):
-        def __init__(self, status: Optional[str]) -> None:
+        def __init__(self, status: str | None) -> None:
             self.status = status
             super().__init__()
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._spans: List[Tuple[int, int, Optional[str]]] = []
+        self._spans: list[tuple[int, int, str | None]] = []
 
-    def paint(self, width: int, t: Tokens) -> List[Text]:
+    def paint(self, width: int, t: Tokens) -> list[Text]:
         counts, active = self.data
         line, self._spans = draw.summary_line(width, t, counts, active)
         return [line]
@@ -179,7 +210,7 @@ class QueueHeader(Painted):
 
     DEFAULT_CSS = "QueueHeader { height: 2; }"
 
-    def paint(self, width: int, t: Tokens) -> List[Text]:
+    def paint(self, width: int, t: Tokens) -> list[Text]:
         return draw.table_header(self.data[0], t)
 
 
@@ -190,7 +221,7 @@ class QueueView(ScrollView, can_focus=True):
     :class:`QueueView.ContextRequested` on right-click.
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "cursor(-1)", "up", show=False),
         Binding("down", "cursor(1)", "down", show=False),
         Binding("pageup", "cursor(-10)", show=False),
@@ -220,14 +251,14 @@ class QueueView(ScrollView, can_focus=True):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._jobs: List[Job] = []
-        self._keys: List[str] = []
+        self._jobs: list[Job] = []
+        self._keys: list[str] = []
         self._cursor = 0
         self._seeded = False
         self.cols = draw.columns(120)
 
     # -- data ------------------------------------------------------------
-    def render_jobs(self, jobs: List[Job]) -> None:
+    def render_jobs(self, jobs: list[Job]) -> None:
         """Replace the rows, keeping the cursor on the same JOB.
 
         Anchored on ``model|mode|library`` rather than the row index, so a
@@ -258,7 +289,7 @@ class QueueView(ScrollView, can_focus=True):
         self.render_jobs([])
 
     @property
-    def selected_key(self) -> Optional[str]:
+    def selected_key(self) -> str | None:
         """``model|mode|library`` of the selected row — its real identity."""
         if not self._keys:
             return None
@@ -306,7 +337,7 @@ class QueueView(ScrollView, can_focus=True):
         elif self._cursor >= top + height:
             self.scroll_to(y=self._cursor - height + 1, animate=False)
 
-    def key_at(self, y: int) -> Optional[str]:
+    def key_at(self, y: int) -> str | None:
         """Which job key is on this row of the widget."""
         index = y + self.scroll_offset.y
         if 0 <= index < len(self._keys):
@@ -353,18 +384,21 @@ class LogDrawer(Painted):
         self._dragging = False
         self._last_y = 0
 
-    def paint(self, width: int, t: Tokens) -> List[Text]:
+    def paint(self, width: int, t: Tokens) -> list[Text]:
         model, follow, lines, placeholder = self.data
         height = self.size.height or 14
         room = max(0, height - 4)
         self.back = max(0, min(self.back, len(lines) - room))
         end = len(lines) - self.back
-        return draw.log_drawer(
+        drawn, spans = draw.log_drawer(
             width, height, t, model, follow, lines[:end], placeholder
         )
+        self.hints = [(0, start, end, key) for start, end, key in spans]
+        return drawn
 
     def on_mouse_down(self, event: MouseDown) -> None:
-        if event.y == 0:
+        # The top edge drags, except where the follow toggle sits on it.
+        if event.y == 0 and self.hint_at(event.x, event.y) is None:
             self._dragging = True
             self._last_y = event.screen_y
             self.capture_mouse()
@@ -406,7 +440,7 @@ class ContextMenu(Vertical):
             self.key = key
             super().__init__()
 
-    ITEMS = [
+    ITEMS: ClassVar[list[tuple[str, str, str]]] = [
         ("top", "Run next (move to top)", ""),
         ("up", "Move up", ""),
         ("down", "Move down", ""),

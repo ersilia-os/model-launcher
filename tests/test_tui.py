@@ -22,7 +22,8 @@ from model_launcher.tui import draw
 from model_launcher.tui import hosts as hosts_mod
 from model_launcher.tui.app import SchedulerTUI
 from model_launcher.tui.hosts import HostScreen
-from model_launcher.tui.widgets import LogDrawer, QueueView, StatusSummary
+from model_launcher.tui.theme import tokens
+from model_launcher.tui.widgets import KeyFooter, LogDrawer, QueueView, StatusSummary
 
 
 async def _until(pilot, predicate, timeout: float = 20.0) -> None:
@@ -61,6 +62,7 @@ def test_percent_never_reads_finished_or_unstarted_while_partway():
     assert draw.columns(120).percent == 114  # the spec's grid, exactly
 
 
+@pytest.mark.linux_only
 def test_dashboard_selects_the_running_job_and_filters(environment):
     scheduler = environment
     scheduler.write_queue("eos_run ersilia testlib\neos_wait ersilia testlib\n")
@@ -89,7 +91,31 @@ def test_dashboard_selects_the_running_job_and_filters(environment):
             await pilot.press("escape")
             assert not drawer.display
 
+            # The footer hints are buttons too: click "l log", then "f".
+            footer = app.query_one("#footer", KeyFooter)
+            log_x = next(s for _, s, _, k in footer.hints if k == "l")
+            await pilot.click("#footer", offset=(log_x, 0))
+            await _until(pilot, lambda: drawer.display)
+            await pilot.pause(0.1)
+            follow_x = next(s for _, s, _, k in drawer.hints if k == "f")
+            await pilot.click("#log", offset=(follow_x, 0))
+            assert app.follow_log is False
+
     asyncio.run(scenario())
+
+
+def test_every_drawn_key_hint_runs_an_action():
+    t = tokens(True)
+    _, spans = draw.footer(120, t, draw.DASHBOARD_KEYS)
+    for snap in (
+        Snapshot(),
+        Snapshot(jobs=[Job(1, "m", "ersilia", "lib", status="running")]),
+    ):
+        spans += draw.running_card(120, t, snap)[1]
+    spans += draw.log_drawer(120, 14, t, "m", True, [])[1]
+    keys = {key for _, _, key in spans}
+    assert {"K", "J", "^o", "f"} <= keys  # K/J split in two
+    assert keys <= set(SchedulerTUI.HINT_ACTIONS)
 
 
 def test_the_picker_connects_to_the_chosen_host(environment, monkeypatch):
@@ -168,6 +194,7 @@ def test_switching_host_forgets_the_old_hosts_counts(environment):
     asyncio.run(scenario())
 
 
+@pytest.mark.linux_only
 def test_probe_reports_a_running_driver(running_scheduler, monkeypatch):
     status = probe_host(None)
     mine = [d for d in status.drivers if d.log_dir == str(running_scheduler.log_dir)]

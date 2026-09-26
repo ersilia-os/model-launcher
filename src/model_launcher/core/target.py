@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import posixpath
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 from .discover import Driver, discover_drivers
 from .runner import Runner, RunnerError, SshRunner, build_runner
@@ -42,11 +41,11 @@ class Resolution:
         The SSH host, or "" for this machine.
     """
 
-    runner: Optional[Runner]
-    source: Optional[str] = None
-    hint: Optional[str] = None
-    warning: Optional[str] = None
-    choices: List[Driver] = field(default_factory=list)
+    runner: Runner | None
+    source: str | None = None
+    hint: str | None = None
+    warning: str | None = None
+    choices: list[Driver] = field(default_factory=list)
     host: str = ""
 
 
