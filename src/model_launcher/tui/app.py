@@ -13,14 +13,13 @@ up as a "stale" banner rather than a frozen terminal.
 from __future__ import annotations
 
 import os
+import socket
 from typing import List, Optional
 
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from textual.widgets import Button, Footer, RichLog, Static
 
 from .dialogs import AddScreen, ConfirmScreen
 from .hosts import HostScreen
@@ -34,8 +33,20 @@ from ..core.model import (
 )
 from ..core.runner import Runner, RunnerError
 from ..core.target import Resolution
-from .theme import DARK_THEME, LIGHT_THEME, THEMES
-from .widgets import ContextMenu, QueueTable, Splitter, StatChips, set_dark
+from . import draw
+from .theme import DARK_THEME, LIGHT_THEME, THEMES, Tokens, tokens
+from .widgets import (
+    Band,
+    Banner,
+    ContextLine,
+    ContextMenu,
+    KeyFooter,
+    LogDrawer,
+    QueueHeader,
+    QueueView,
+    RunningCard,
+    StatusSummary,
+)
 
 
 def _shorten_path(path: str, keep: int = 44) -> str:
@@ -57,27 +68,29 @@ class SchedulerTUI(App):
     CSS_PATH = "app.tcss"
     TITLE = "Ersilia wave scheduler"
 
-    # Only the everyday verbs are shown in the footer. Fifteen keys will not fit on
-    # one line, and a footer that wraps or truncates mid-word ("R re ^p pa lette")
-    # teaches nothing. The hidden ones still work, are all on the toolbar or the
-    # right-click menu, and appear in the command palette.
+    # The footer is drawn by KeyFooter from draw.DASHBOARD_KEYS, not from these,
+    # so `show` is irrelevant; every binding still appears in the command palette.
     BINDINGS = [
         Binding("a", "add", "add"),
-        Binding("x", "remove", "rm"),
-        Binding("t", "top", "top"),
-        Binding("K", "move_up", "up"),
-        Binding("J", "move_down", "down"),
-        Binding("h", "hold", "hold"),
+        Binding("x", "remove", "remove"),
+        Binding("t", "top", "run next"),
+        Binding("K", "move_up", "move up"),
+        Binding("J", "move_down", "move down"),
+        Binding("h", "hold", "hold / unhold"),
+        Binding("r", "retry", "retry"),
         Binding("c", "cancel", "cancel"),
-        Binding("p", "pause", "pause"),
+        Binding("p", "pause", "pause / resume"),
         Binding("l", "toggle_log", "log"),
-        Binding("H", "switch_host", "host"),
+        Binding("ctrl+o", "switch_host", "hosts"),
+        Binding("H", "switch_host", "hosts", show=False),
+        Binding("s", "stop_after", "stop after current"),
+        Binding("f", "toggle_follow", "follow log"),
+        Binding("plus,equals_sign", "log_size(2)", "taller log", show=False),
+        Binding("minus", "log_size(-2)", "shorter log", show=False),
+        Binding("escape", "close_log", "close log", show=False),
+        Binding("R", "recount", "recount from S3"),
+        Binding("D", "toggle_dark_theme", "light/dark theme"),
         Binding("q", "quit", "quit"),
-        Binding("r", "retry", "retry", show=False),
-        Binding("s", "stop_after", "stop after current", show=False),
-        Binding("f", "toggle_follow", "follow log", show=False),
-        Binding("R", "recount", "recount from S3", show=False),
-        Binding("D", "toggle_dark_theme", "light/dark theme", show=False),
     ]
 
     show_log: reactive[bool] = reactive(False)
@@ -119,54 +132,39 @@ class SchedulerTUI(App):
         self.snapshot: Snapshot = Snapshot()
         self.filter_status: Optional[str] = None
         self._log_model: Optional[str] = None
-        self._log_rendered: Optional[str] = None
-        self._log_height = 40
-        self._busy = False
+        #: (job key, lines) last shown in the drawer; frozen while follow is off
+        self._log_shown: Optional[tuple] = None
+        self._log_height = 14
+        self._dark = True
         self._menu: Optional[ContextMenu] = None
+
+    @property
+    def tokens(self) -> Tokens:
+        """Cell colours for the current theme, read by every painted widget."""
+        return tokens(self._dark)
 
     # ------------------------------------------------------------------
     # layout
     # ------------------------------------------------------------------
     def compose(self) -> ComposeResult:
-        with Vertical(id="hdr"):
-            yield Static("", id="hdr-title")
-            yield Static("", id="hdr-meta")
-        yield Static("", id="banner")
-        yield StatChips(id="chips")
-        with Horizontal(id="toolbar"):
-            yield Button("+ add", id="tb-add")
-            yield Button("run next", id="tb-top")
-            yield Button("↑", id="tb-up")
-            yield Button("↓", id="tb-down")
-            yield Button("hold", id="tb-hold")
-            yield Button("retry", id="tb-retry")
-            yield Button("log", id="tb-log")
-            yield Button("cancel", id="tb-cancel", classes="-danger")
-            yield Button("remove", id="tb-rm", classes="-danger")
-            yield Static("", id="toolbar-spacer")
-            yield Button("pause queue", id="tb-pause")
-            yield Button("recount", id="tb-refresh")
-        with Vertical(id="table-wrap"):
-            yield QueueTable(id="table")
-        yield Splitter(id="splitter")
-        with Vertical(id="log-wrap"):
-            yield Static("", id="log-title")
-            # RichLog scrolls itself — wrapping it in a VerticalScroll would nest
-            # two scrollbars and swallow the wheel.
-            yield RichLog(
-                id="log-view",
-                wrap=False,
-                highlight=False,
-                markup=False,
-                auto_scroll=True,
-            )
-        yield Footer()
+        yield Band(id="band")
+        yield ContextLine(id="context")
+        yield Banner(id="banner")
+        yield RunningCard(id="card")
+        yield StatusSummary(id="summary")
+        yield QueueHeader(id="qhead")
+        yield QueueView(id="table")
+        yield LogDrawer(id="log")
+        yield KeyFooter(id="footer")
 
     def on_mount(self) -> None:
         for theme in THEMES:
             self.register_theme(theme)
         self.theme = self.start_theme
-        self.query_one("#table", QueueTable).focus()
+        self._render_footer()
+        self._render_banner(None)
+        self._render_header()
+        self.query_one("#table", QueueView).focus()
         if self.runner is None:
             self._pick_host(initial=True)
         else:
@@ -278,6 +276,7 @@ class SchedulerTUI(App):
         else:
             self._render_banner(None)
         self._render_header()
+        self._render_footer()
         self._render_chips()
         self._render_table()
         self._render_log()
@@ -289,46 +288,37 @@ class SchedulerTUI(App):
     # rendering
     # ------------------------------------------------------------------
     def _render_banner(self, message: Optional[str], error: bool = False) -> None:
-        banner = self.query_one("#banner", Static)
-        if message:
-            banner.update(message)
-            banner.set_class(error, "-error")
-            banner.add_class("visible")
-        else:
-            banner.remove_class("visible")
+        self.query_one("#banner", Banner).show(message or "", error)
+
+    def _host_label(self) -> str:
+        if self.runner is None:
+            return "no host"
+        location = self.runner.location
+        return socket.gethostname() if location == "local" else location
 
     def _render_header(self) -> None:
         snap = self.snapshot
-        glyph = {
-            "RUNNING": "●",
-            "RUNNING (old driver)": "●",
-            "PAUSED": "‖",
-            "STOPPING": "◐",
-            "STOPPED": "○",
-        }.get(snap.driver_state, "●" if snap.driver_alive else "○")
-        title = f"{glyph} {snap.driver_state}"
-        if snap.driver_pid and snap.driver_alive:
-            title += f"  ·  pid {snap.driver_pid}"
-        title += f"  ·  {self.runner.location}"
-        if snap.runtime.get("dry_run") == "1" or snap.driver_info.get("dry_run") == "1":
-            title += "  ·  DRY-RUN"
-        self.query_one("#hdr-title", Static).update(title)
-
-        default_library = snap.default_library or "<none>"
-        meta = (
-            f"queue {_shorten_path(snap.queue_file) or '<unknown>'}   "
-            f"default lib {default_library}   "
-            f"wave {snap.driver_info.get('default_wave_size', '?')}   "
-            f"partition {snap.driver_info.get('default_queue', '?')}   "
-            f"updated {snap.runtime.get('now', '')}"
+        self.query_one("#band", Band).show(self._host_label(), snap)
+        self.query_one("#context", ContextLine).show(
+            (
+                ("queue", _shorten_path(snap.queue_file) or "<unknown>"),
+                ("lib", snap.default_library or "<none>"),
+                ("wave", snap.driver_info.get("default_wave_size", "?")),
+                ("partition", snap.driver_info.get("default_queue", "?")),
+            )
         )
-        self.query_one("#hdr-meta", Static).update(meta)
+        self.query_one("#card", RunningCard).show_snapshot(snap)
 
-        pause_btn = self.query_one("#tb-pause", Button)
-        pause_btn.label = "resume queue" if snap.paused else "pause queue"
+    def _render_footer(self) -> None:
+        groups = [list(group) for group in draw.DASHBOARD_KEYS]
+        if self.snapshot.paused:
+            groups[3][0] = ("p", "resume")
+        self.query_one("#footer", KeyFooter).show(tuple(tuple(g) for g in groups))
 
     def _render_chips(self) -> None:
-        self.query_one("#chips", StatChips).update_counts(self.snapshot.counts())
+        self.query_one("#summary", StatusSummary).show(
+            self.snapshot.counts(), self.filter_status
+        )
 
     def visible_jobs(self) -> List[Job]:
         if self.filter_status is None:
@@ -336,7 +326,9 @@ class SchedulerTUI(App):
         return [j for j in self.snapshot.jobs if j.status == self.filter_status]
 
     def _render_table(self) -> None:
-        self.query_one("#table", QueueTable).render_jobs(self.visible_jobs())
+        table = self.query_one("#table", QueueView)
+        self.query_one("#qhead", QueueHeader).show(table.cols)
+        table.render_jobs(self.visible_jobs())
 
     def _render_log(self) -> None:
         if not self.show_log:
@@ -347,25 +339,21 @@ class SchedulerTUI(App):
             running = snap.running_job()
             key = running.key if running else None
         job = snap.find_by_key(key) if key else None
-        model = job.model if job else None
-        follow = "follow ✓" if self.follow_log else "follow ✗ (frozen)"
-        title = f"log · {model or '(no job selected)'}    [{follow}]"
-        self.query_one("#log-title", Static).update(title)
+        model = job.model if job else ""
 
         # With follow off the view is frozen so you can actually read a wall of
         # orchestrator output without it being yanked to the bottom every tick.
-        if not self.follow_log and self._log_rendered == key:
-            return
-        self._log_rendered = key
+        if self.follow_log or self._log_shown is None or self._log_shown[0] != key:
+            self._log_shown = (key, tuple(snap.log_text.splitlines()))
+        lines = self._log_shown[1]
 
-        view = self.query_one("#log-view", RichLog)
-        view.clear()
-        if snap.log_text:
-            view.write(snap.log_text)
-        elif model:
-            view.write(f"(no output yet in {snap.log_path or 'the job log'})")
+        if model:
+            placeholder = f"(no output yet in {snap.log_path or 'the job log'})"
         else:
-            view.write("(select a job and press l, or double-click a row)")
+            placeholder = "(select a job and press l, or double-click a row)"
+        self.query_one("#log", LogDrawer).show(
+            model, self.follow_log, lines, placeholder
+        )
 
     # ------------------------------------------------------------------
     # ctl invocation
@@ -396,7 +384,7 @@ class SchedulerTUI(App):
     # ------------------------------------------------------------------
     @property
     def selected(self) -> Optional[Job]:
-        key = self.query_one("#table", QueueTable).selected_key
+        key = self.query_one("#table", QueueView).selected_key
         if not key:
             return None
         return self.snapshot.find_by_key(key)
@@ -580,7 +568,22 @@ class SchedulerTUI(App):
 
     def action_toggle_follow(self) -> None:
         self.follow_log = not self.follow_log
+        if self.follow_log:
+            self.query_one("#log", LogDrawer).back = 0
         self._render_log()
+
+    def action_close_log(self) -> None:
+        self.show_log = False
+
+    def action_log_size(self, delta: int) -> None:
+        if self.show_log:
+            self._resize_log(delta)
+
+    def _resize_log(self, delta: int) -> None:
+        # Clamp so neither the drawer nor the queue above it vanishes.
+        limit = max(6, self.size.height - 10)
+        self._log_height = max(6, min(limit, self._log_height + delta))
+        self.query_one("#log", LogDrawer).styles.height = self._log_height
 
     def action_switch_host(self) -> None:
         self._pick_host(initial=False)
@@ -617,13 +620,15 @@ class SchedulerTUI(App):
         self._count_cache = {}
         self.snapshot = Snapshot()
         self._log_model = None
-        self._log_rendered = None
+        self._log_shown = None
         self.filter_status = None
         self._live_scope = "running"
         self._live_in_flight = False
         self._recounting = False
         save_last_host(resolution.host or None)
         self._render_banner(None)
+        self.query_one("#table", QueueView).reset()
+        self._render_header()
         self._render_table()
         self._render_chips()
         if resolution.warning:
@@ -636,16 +641,16 @@ class SchedulerTUI(App):
     # reactive watchers
     # ------------------------------------------------------------------
     def watch_theme(self, theme_name: str) -> None:
-        """Keep the table's cell palette in step with the app theme.
+        """Keep the painted regions in step with the app theme.
 
-        The table cells are Rich renderables with literal colours, so they cannot
-        pick up TCSS variables — they have to be told, then re-rendered.
+        They are drawn with literal colours from the design tokens, so they
+        cannot pick up TCSS variables — they have to be told, then repainted.
         """
         obj = self.get_theme(theme_name)
-        set_dark(bool(obj.dark) if obj else True)
+        self._dark = bool(obj.dark) if obj else True
         if self.is_mounted:
-            self._render_table()
-            self._render_chips()
+            for widget in self.query("Painted, QueueView"):
+                widget.refresh()
 
     def action_toggle_dark_theme(self) -> None:
         # Only the two Ersilia themes are in play; this toggles strictly between
@@ -655,27 +660,31 @@ class SchedulerTUI(App):
     def watch_show_log(self, show: bool) -> None:
         if not self.is_mounted:
             return
-        self.query_one("#log-wrap").set_class(show, "visible")
-        self.query_one("#splitter").set_class(show, "visible")
+        self.query_one("#log", LogDrawer).set_class(show, "visible")
         if show:
             self.refresh_snapshot()
 
     # ------------------------------------------------------------------
     # widget messages
     # ------------------------------------------------------------------
-    @on(StatChips.Toggled)
-    def _on_chip(self, event: StatChips.Toggled) -> None:
+    @on(StatusSummary.Toggled)
+    def _on_filter(self, event: StatusSummary.Toggled) -> None:
         self.filter_status = event.status
+        self._render_chips()
         self._render_table()
 
-    @on(QueueTable.OpenLog)
-    def _on_open_log(self, event: QueueTable.OpenLog) -> None:
+    @on(QueueView.Resized)
+    def _on_table_resized(self, event: QueueView.Resized) -> None:
+        self.query_one("#qhead", QueueHeader).show(event.cols)
+
+    @on(QueueView.OpenLog)
+    def _on_open_log(self, event: QueueView.OpenLog) -> None:
         self._log_model = event.key
         self.show_log = True
         self.refresh_snapshot()
 
-    @on(QueueTable.ContextRequested)
-    def _on_context(self, event: QueueTable.ContextRequested) -> None:
+    @on(QueueView.ContextRequested)
+    def _on_context(self, event: QueueView.ContextRequested) -> None:
         self._close_menu()
         menu = ContextMenu(event.key)
         self._menu = menu
@@ -710,30 +719,14 @@ class SchedulerTUI(App):
             self._menu.remove()
             self._menu = None
 
-    @on(Splitter.Dragged)
-    def _on_splitter(self, event: Splitter.Dragged) -> None:
-        # Dragging down shrinks the log pane; clamp so neither pane vanishes.
-        total = max(1, self.size.height)
-        delta_pct = int(event.delta * 100 / total)
-        self._log_height = max(10, min(80, self._log_height - delta_pct))
-        self.query_one("#log-wrap").styles.height = f"{self._log_height}%"
+    @on(LogDrawer.Dragged)
+    def _on_log_dragged(self, event: LogDrawer.Dragged) -> None:
+        # Dragging the top edge down shrinks the drawer.
+        self._resize_log(-event.delta)
 
-    @on(Button.Pressed)
-    def _on_toolbar(self, event: Button.Pressed) -> None:
-        actions = {
-            "tb-add": self.action_add,
-            "tb-top": self.action_top,
-            "tb-up": self.action_move_up,
-            "tb-down": self.action_move_down,
-            "tb-hold": self.action_hold,
-            "tb-retry": self.action_retry,
-            "tb-log": self.action_toggle_log,
-            "tb-cancel": self.action_cancel,
-            "tb-rm": self.action_remove,
-            "tb-pause": self.action_pause,
-            "tb-refresh": self.action_recount,
-        }
-        action = actions.get(event.button.id or "")
-        if action:
-            event.stop()
-            action()
+    @on(LogDrawer.Scrolled)
+    def _on_log_scrolled(self, event: LogDrawer.Scrolled) -> None:
+        # Reading back through the tail must not be yanked to the end each tick.
+        if self.follow_log:
+            self.follow_log = False
+            self._render_log()

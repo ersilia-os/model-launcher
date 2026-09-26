@@ -31,6 +31,8 @@ to tell apart using six secondary colours.
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass, field
 from typing import Dict, Tuple
 
 from textual.theme import Theme
@@ -143,26 +145,91 @@ _LIGHT_STATUS: Dict[str, Tuple[str, str]] = {
 _FALLBACK = ("#9A8FA0", "·")
 
 
-class Palette:
-    """Colours the Rich-rendered table cells need, for one theme mode."""
+# ---------------------------------------------------------------------------
+# cell tokens — the design handoff's token table, used by ``draw.py``
+# ---------------------------------------------------------------------------
 
-    def __init__(self, dark: bool) -> None:
-        self.dark = dark
-        self.status = _DARK_STATUS if dark else _LIGHT_STATUS
-        # The bar track must be barely there: on a queue of 50 rows a bright track
-        # becomes a texture that competes with the fills it exists to measure.
-        self.track = "#33263C" if dark else "#E2DAE6"  # SHADE / TINT of Plum
-        self.dim = "#9A8FA0" if dark else "#7C6B84"
-        self.text = "#F2ECF4" if dark else "#2A1730"
-        self.bright = WHITE if dark else "#1A0E20"
-        self.rule = "#2A1D33" if dark else "#DDD2E2"
+
+@dataclass(frozen=True)
+class Tokens:
+    """Every colour the character-grid renderer needs, for one theme mode.
+
+    The names are the design handoff's (``design_handoff_model_launcher_tui``),
+    so a value can be checked against the spec by name.
+    """
+
+    dark: bool
+    bg: str
+    surface: str
+    panel: str
+    fg: str
+    bright: str
+    primary: str
+    muted: str
+    cursor: str
+    track: str
+    warn: str
+    err: str
+    live: str
+    band: str
+    band_muted: str
+    status: Dict[str, Tuple[str, str]] = field(default_factory=dict)
 
     def status_style(self, status: str) -> Tuple[str, str]:
+        """(colour, glyph) for a job status."""
         return self.status.get(status, _FALLBACK)
 
 
-PALETTES = {True: Palette(dark=True), False: Palette(dark=False)}
+DARK_TOKENS = Tokens(
+    dark=True,
+    bg="#160F1B",
+    surface="#1E1526",
+    panel="#2A1D33",
+    fg="#F2ECF4",
+    bright=WHITE,
+    primary=MINT,
+    muted="#9A8FA0",
+    cursor="#3A2846",
+    track="#33263C",
+    warn=YELLOW,
+    err=ORANGE,
+    live=BLUE,
+    band=PLUM,
+    band_muted="#CDB9D3",
+    status=_DARK_STATUS,
+)
+
+LIGHT_TOKENS = Tokens(
+    dark=False,
+    bg="#FAF8FB",
+    surface=WHITE,
+    panel="#F1EBF4",
+    fg="#2A1730",
+    bright="#1A0E20",
+    primary=PLUM,
+    muted="#7C6B84",
+    cursor="#E4D8EA",
+    track="#E2DAE6",
+    warn="#A87A1E",
+    err="#B03A28",
+    live="#2F7FC4",
+    band=PLUM,
+    band_muted="#DCCBE1",
+    status=_LIGHT_STATUS,
+)
 
 
-def palette(dark: bool = True) -> Palette:
-    return PALETTES[bool(dark)]
+def tokens(dark: bool = True) -> Tokens:
+    """The cell tokens for one theme mode."""
+    return DARK_TOKENS if dark else LIGHT_TOKENS
+
+
+def mix(a: str, b: str, t: float) -> str:
+    """Blend colour ``a`` toward ``b`` by ``t`` (0 = a, 1 = b), as ``#RRGGBB``."""
+    ca = [int(a[i : i + 2], 16) for i in (1, 3, 5)]
+    cb = [int(b[i : i + 2], 16) for i in (1, 3, 5)]
+    # floor(v + 0.5) rather than round(): JavaScript's Math.round, which the design
+    # generator used, so blended colours match the mockups exactly.
+    return "#" + "".join(
+        f"{math.floor(x + (y - x) * t + 0.5):02X}" for x, y in zip(ca, cb)
+    )

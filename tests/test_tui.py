@@ -1,4 +1,4 @@
-"""Smoke tests for the dashboard's host picker and host switching.
+"""Smoke tests for the dashboard, its host picker and host switching.
 
 Driven with Textual's own test harness (``run_test``) against the real bash
 scheduler from the fixtures; only the host list and the SSH probe are stubbed,
@@ -18,9 +18,11 @@ from model_launcher.core.model import Job, Snapshot
 from model_launcher.core.remote import ctl_path
 from model_launcher.core.runner import LocalRunner
 from model_launcher.core.target import Resolution
+from model_launcher.tui import draw
 from model_launcher.tui import hosts as hosts_mod
 from model_launcher.tui.app import SchedulerTUI
 from model_launcher.tui.hosts import HostScreen
+from model_launcher.tui.widgets import LogDrawer, QueueView, StatusSummary
 
 
 async def _until(pilot, predicate, timeout: float = 20.0) -> None:
@@ -48,6 +50,46 @@ def _local_runner(scheduler) -> LocalRunner:
         log_dir=str(scheduler.log_dir),
         queue_file=str(scheduler.queue_file),
     )
+
+
+def test_percent_never_reads_finished_or_unstarted_while_partway():
+    assert draw.pct(13638, 13639) == "99%"
+    assert draw.pct(1, 13639) == "1%"
+    assert draw.pct(13639, 13639) == "100%"
+    assert draw.pct(0, 0) == "—"
+    assert draw.pct_fine(8412, 13639) == "61.6%"
+    assert draw.columns(120).percent == 114  # the spec's grid, exactly
+
+
+def test_dashboard_selects_the_running_job_and_filters(environment):
+    scheduler = environment
+    scheduler.write_queue("eos_run ersilia testlib\neos_wait ersilia testlib\n")
+    scheduler.start_driver()
+    scheduler.wait_for_status("eos_run", "running")
+
+    async def scenario() -> None:
+        app = SchedulerTUI(
+            _local_runner(scheduler), refresh_interval=0.2, live_interval=0
+        )
+        async with app.run_test(size=(120, 34)) as pilot:
+            table = app.query_one("#table", QueueView)
+            await _until(pilot, lambda: len(app.snapshot.jobs) == 2)
+            await pilot.pause(0.1)
+            assert table.selected_key == "eos_run|ersilia|testlib"
+
+            app.query_one("#summary", StatusSummary).post_message(
+                StatusSummary.Toggled("pending")
+            )
+            await _until(pilot, lambda: app.filter_status == "pending")
+            assert [j.model for j in app.visible_jobs()] == ["eos_wait"]
+
+            drawer = app.query_one("#log", LogDrawer)
+            await pilot.press("l")
+            assert drawer.display
+            await pilot.press("escape")
+            assert not drawer.display
+
+    asyncio.run(scenario())
 
 
 def test_the_picker_connects_to_the_chosen_host(environment, monkeypatch):

@@ -22,7 +22,7 @@ from ..target import resolve_target
 def tui(ctx, refresh):
     """Watch and steer the queue in a full-screen dashboard.
 
-    With no --host (or --ctl), it first asks which machine to drive; press H
+    With no --host (or --ctl), it first asks which machine to drive; press Ctrl+O
     inside it to switch.
     """
     obj = ctx.obj

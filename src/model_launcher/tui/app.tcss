@@ -1,14 +1,10 @@
 /* ==========================================================================
-   scheduler-tui stylesheet
+   model-launcher dashboard stylesheet
    ==========================================================================
-   Colours come from the registered theme (see theme.py), NOT from literals here,
-   so Textual's own widgets — footer, toasts, modals, Select dropdowns — sit in the
-   same palette as our table instead of showing default slate through the gaps.
-
-   Design principle: the running row is the only luminous thing on screen, and
-   warmth always means attention. So the chrome is deliberately quiet — panels a
-   half-step off the background, hairline rules, no filled blocks except where
-   something needs a human.
+   Layout only. The dashboard regions are drawn cell by cell in draw.py with the
+   design tokens from theme.py, so colours live there, not here. What remains
+   below the dashboard block styles the Textual widgets still in use (modals,
+   the context menu) from the registered theme's variables.
    ========================================================================== */
 
 Screen {
@@ -16,159 +12,22 @@ Screen {
     background: $background;
 }
 
-/* ---- header -------------------------------------------------------------- */
-#hdr {
-    height: auto;
-    padding: 0 1;
-    background: $surface;
-}
-#hdr-title {
-    text-style: bold;
-    color: $primary;
-}
-#hdr-meta {
-    color: $text-muted;
-}
-
-/* The banner is an inset warning, not a filled alarm bar: a full-bleed saturated
-   block dominates a screen you are meant to watch for hours. */
-#banner {
-    display: none;
-    padding: 0 1;
-    margin: 0 1;
-    background: $surface;
-    color: $warning;
-    border-left: thick $warning;
-}
-#banner.visible { display: block; }
-#banner.-error {
-    color: $error;
-    border-left: thick $error;
-}
-
-/* ---- status chips (clickable filters) ------------------------------------ */
-#chips {
-    height: 1;
-    padding: 0 1;
-    background: $background;
-    layout: horizontal;
-    overflow-x: hidden;
-}
-.chip {
-    padding: 0 1;
-    margin: 0 1 0 0;
-    height: 1;
-    width: auto;
-    min-width: 0;
-    border: none;
-    background: $background;
-    color: $text-muted;
-    text-style: none;
-}
-.chip:hover {
-    background: $panel;
-    color: $foreground;
-}
-.chip.-active {
-    background: $primary 25%;
-    color: $foreground;
-    text-style: bold;
-}
-/* A status with no jobs is hidden rather than dimmed — nothing to filter to. */
-.chip.-hidden { display: none; }
-
-/* ---- toolbar ------------------------------------------------------------- */
-#toolbar {
-    height: 1;
-    padding: 0 1;
-    background: $background;
-}
-/* Tinted, not plain text: these need to read as controls you can click, but must
-   not shout over the table. A dim primary tint plus a bracket-free label is enough
-   affordance once the hover state is obvious. */
-#toolbar Button {
-    height: 1;
-    min-width: 0;
-    width: auto;
-    padding: 0 1;
-    margin: 0 1 0 0;
-    border: none;
-    background: $panel;
-    color: $primary;
-    text-style: none;
-}
-#toolbar Button:hover {
-    background: $primary;
-    color: $background;
-    text-style: bold;
-}
-#toolbar Button.-danger { color: $error; }
-#toolbar Button.-danger:hover {
-    background: $error;
-    color: $background;
-    text-style: bold;
-}
-#toolbar-spacer { width: 1fr; }
-
-/* ---- the queue table ----------------------------------------------------- */
-#table-wrap {
+#band, #context, #summary { height: 1; }
+#card { margin-bottom: 1; }
+#summary { margin-bottom: 1; }
+#table {
     height: 1fr;
-}
-QueueTable {
-    height: 100%;
-    border: none;
     background: $background;
     scrollbar-size-vertical: 1;
     scrollbar-background: $background;
     scrollbar-color: $panel;
     scrollbar-color-hover: $primary;
 }
-QueueTable > .datatable--header {
-    background: $background;
-    color: $text-muted;
-    text-style: none;
-}
-QueueTable > .datatable--cursor {
-    background: $block-cursor-background;
-    color: $block-cursor-foreground;
-    text-style: $block-cursor-text-style;
-}
-QueueTable > .datatable--hover { background: $panel; }
-
-/* ---- log pane ------------------------------------------------------------ */
-#log-wrap {
-    height: 40%;
-    display: none;
-}
-#log-wrap.visible { display: block; }
-#log-title {
-    height: 1;
-    padding: 0 1;
-    background: $surface;
-    color: $primary;
-}
-#log-view {
-    height: 1fr;
-    padding: 0 1;
-    background: $background;
-    color: $text-muted;
-    scrollbar-size-vertical: 1;
-    scrollbar-background: $background;
-    scrollbar-color: $panel;
-}
-
-/* A one-row grip you can drag to resize the log pane. Doubles as the divider,
-   so there is exactly one rule between the panes rather than two. */
-#splitter {
-    height: 1;
-    background: $background;
-    color: $panel;
-    display: none;
-}
-#splitter.visible { display: block; }
-#splitter:hover {
-    color: $primary;
-}
+#log { display: none; }
+#log.visible { display: block; }
+/* In the flow, not docked: a docked footer covers the last row of whatever is
+   above it (the drawer's bottom border, or the last job in the queue). */
+#footer { height: 1; }
 
 /* ---- modals -------------------------------------------------------------- */
 AddScreen, ConfirmScreen, HostScreen {
