@@ -19,6 +19,17 @@ conda activate model-launcher
 pip install git+https://github.com/ersilia-os/model-launcher.git
 ```
 
+> [!IMPORTANT]
+> **The scheduler runs on Linux only** (it needs bash ≥ 4, `flock`, `setsid`
+> and `/proc`). From a Mac, use the client to drive a Linux `--host`; that
+> needs nothing extra. To run the test suite on a Mac, first:
+>
+> ```bash
+> brew install bash flock   # check: `bash --version` must say 5.x
+> ```
+>
+> Tests that need `setsid` or `/proc` are then skipped (`linux_only`).
+
 ## Quick start
 
 ```bash
@@ -75,7 +86,7 @@ who ran every mutating command, and cancellation notes say who asked.
 
 ```bash
 pip install -e ".[dev]"
-pytest          # 154 tests, no cluster and no AWS credentials needed
+pytest          # 193 tests, no cluster and no AWS credentials needed (macOS: see the note above)
 ruff check . && ruff format .
 ```
 

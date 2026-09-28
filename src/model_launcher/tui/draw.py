@@ -210,12 +210,19 @@ class Canvas:
             self.put(x + 2, y, title, title_fg or fg, bg, bold=True)
 
     def lines(self) -> list[Text]:
-        """One ``Text`` per row, with runs of identical style merged."""
+        """One ``Text`` per row, with runs of identical style merged.
+
+        With ``tokens.dim`` set, every colour is blended toward ``bg`` first —
+        the brand colours drawn as literals included — like ``G.dim()``.
+        """
         out = []
+        dim, base = self.t.dim, self.t.bg
         for row in self.cells:
             text = Text(no_wrap=True, overflow="crop", end="")
             run, key = "", None
             for ch, fg, bg, bold in row:
+                if dim:
+                    fg, bg = mix(fg, base, dim), mix(bg, base, dim)
                 # A space's foreground is invisible, so it may join any run.
                 this = (fg, bg, bold)
                 if key is not None and (
@@ -639,3 +646,329 @@ def log_drawer(
         mix(t.muted, t.bg, 0.3),
     )
     return cv.lines(), spans
+
+
+# ---------------------------------------------------------------------------
+# overlays
+# ---------------------------------------------------------------------------
+def wrap(text: str, width: int) -> list[str]:
+    """Greedy word wrap, as the generator's ``wrap``; ``\\n`` starts a new line."""
+    out: list[str] = []
+    for paragraph in text.split("\n"):
+        cur = ""
+        for word in paragraph.split():
+            if cur and len(cur) + 1 + len(word) > width:
+                out.append(cur)
+                cur = word
+            else:
+                cur = f"{cur} {word}" if cur else word
+        out.append(cur)
+    return out
+
+
+#: Width of the confirm modal, and of the body text inside it.
+CONFIRM_WIDTH = 66
+
+
+def confirm_box(
+    t: Tokens,
+    title: str,
+    detail: str,
+    keep: str,
+    ok: str,
+    subject: tuple[str, str] | None = None,
+    kept: tuple[int, int] | None = None,
+    tone: str = "",
+    glyph: str = "✕",
+) -> tuple[list[Text], Spans]:
+    """The confirm modal (``aConfirm``), and the spans of its two buttons.
+
+    ``subject`` is (model, library) for the second line; ``kept`` is
+    (done, total) for a job being cancelled mid-run, drawn as a bar with
+    ``N kept``. ``tone`` colours the border, glyph and title (``err`` by
+    default).
+    The buttons' keys are ``esc`` and ``y``.
+    """
+    w = CONFIRM_WIDTH
+    body = wrap(detail, w - 8)
+    h = len(body) + 11
+    tone = tone or t.err
+    cv = Canvas(w, h, t)
+    cv.box(0, 0, w, h, tone, t.surface)
+    cv.put(3, 1, glyph, tone, bold=True)
+    cv.put(5, 1, elide(title, w - 8), tone, bold=True)
+    if subject:
+        model, library = subject
+        x = cv.put(5, 3, model, t.bright, bold=True)
+        cv.put(x, 3, elide(f" on {library}", w - 6 - x), t.muted)
+    if kept:
+        done, total = kept
+        bar(cv, 5, 4, w - 18, done, total, t.live)
+        cv.rput(w - 1, 4, f"{num(done)} kept", t.muted)
+    for i, line in enumerate(body):
+        cv.put(5, 6 + i, line, t.fg)
+    y = h - 2
+    keep_label, ok_label = f" esc {keep} ", f" y {ok} "
+    x = w - 1 - (len(keep_label) + 1 + len(ok_label))
+    end = cv.put(x, y, keep_label, t.fg, t.panel)
+    spans: Spans = [(x, end, "esc")]
+    start = end + 1
+    end = cv.put(start, y, ok_label, t.bg, tone, bold=True)
+    spans.append((start, end, "y"))
+    return cv.lines(), spans
+
+
+#: The row menu's items: (label, key, verb), with None for the divider. The verbs
+#: are what the app acts on; the keys are the dashboard's own for the same verb.
+MENU_ITEMS: list[tuple[str, str, str] | None] = [
+    ("Run next", "t", "top"),
+    ("Move up", "K", "up"),
+    ("Move down", "J", "down"),
+    ("Hold", "h", "hold"),
+    ("Retry  (clear verdict)", "r", "retry"),
+    ("Show log", "l", "log"),
+    None,
+    ("Cancel", "c", "cancel"),
+    ("Remove from queue", "x", "rm"),
+]
+MENU_WIDTH, MENU_HEIGHT = 34, 12
+
+
+def context_menu(t: Tokens, model: str, highlighted: int) -> list[Text]:
+    """The row menu (``aCtx``): item ``i`` sits on row ``i + 1``.
+
+    Items after the divider are destructive and drawn in ``err``.
+    """
+    w, h = MENU_WIDTH, MENU_HEIGHT
+    cv = Canvas(w, h, t)
+    title = f" {elide(model, w - 6)} "
+    cv.box(0, 0, w, h, t.panel, t.surface, title=title, title_fg=t.muted)
+    danger = False
+    for i, item in enumerate(MENU_ITEMS):
+        y = 1 + i
+        if item is None:
+            cv.put(1, y, "╌" * (w - 2), t.panel)
+            danger = True
+            continue
+        label, key, _ = item
+        on = i == highlighted
+        if on:
+            cv.fill(1, y, w - 2, 1, t.cursor)
+            cv.put(1, y, "▌", t.primary)
+        cv.put(3, y, label, t.err if danger else t.fg, bold=on)
+        cv.put(w - 4, y, key, t.err if danger else t.primary, bold=True)
+    return cv.lines()
+
+
+#: Height of the add panel, and the size of its completion popup.
+ADD_HEIGHT = 11
+POPUP_WIDTH, POPUP_ROWS = 44, 5
+#: Where the ghost defaults sit when the typed text leaves room (the spec's).
+_GHOST_COLUMN = {"wave": 34, "queue": 46, "flag": 58}
+
+
+def add_panel(
+    width: int,
+    t: Tokens,
+    where: str,
+    parts: Sequence[tuple[str, str]],
+    ghost: str,
+    later: Sequence[tuple[str, str]],
+    popup: Sequence[tuple[str, bool]],
+    highlighted: int,
+    sif: str,
+    error: str,
+    max_cpus: int,
+) -> tuple[list[Text], list[tuple[int, int]]]:
+    """The add panel (``cmdAdd``), and (row, item index) of each popup line.
+
+    ``parts`` are the typed tokens with their field, the last being typed;
+    ``ghost`` completes it and ``later`` are the defaults of the fields after
+    it. ``popup`` is (value, is_default), drawn under the current token.
+    ``where`` is the header's ``host · dispatch``; ``sif`` the expected SIF
+    path (no check is made, so none is claimed); ``error`` why ``⏎`` refused.
+    """
+    cv = Canvas(width, ADD_HEIGHT, t, bg=t.surface)
+    cv.put(0, 0, "━" * width, t.primary)
+    cv.put(2, 0, " add to queue ", t.primary, t.surface, bold=True)
+    cv.rput(width - 4, 0, f" on {where} ", t.muted)
+    cv.put(
+        4,
+        2,
+        "model_id     mode     [library]   [wave_size] [queue]     [flags]",
+        mix(t.muted, t.surface, 0.2),
+    )
+
+    ghost_fg = mix(t.muted, t.surface, 0.3)
+    style = {
+        "model": (t.bright, True),
+        "mode": (t.live, False),
+        "flag": (t.primary, False),
+        "extra": (t.err, False),
+    }
+    x = cv.put(2, 3, "›", t.primary, bold=True) + 1
+    token_x = x
+    for i, (text, field) in enumerate(parts):
+        token_x = x
+        fg, bold = style.get(field, (t.fg, False))
+        x = cv.put(x, 3, text, fg, bold=bold)
+        if i < len(parts) - 1:
+            x += 1
+    cv.put(x, 3, ghost[:1] or " ", ghost_fg, t.primary)  # the block cursor
+    x = cv.put(x + 1, 3, ghost[1:], ghost_fg) + 2
+    for text, field in later:
+        x = cv.put(max(_GHOST_COLUMN.get(field, x), x), 3, text, ghost_fg) + 2
+
+    rx = 76
+    if sif:
+        cv.put(rx, 5, "SIF expected at", t.muted)
+        cv.put(rx, 6, elide(sif, width - rx - 2), t.muted)
+    hints = (("tab", "next field"), ("⏎", "add"), ("esc", "cancel"))
+    key_hints(cv, rx, 8, hints, "   ")
+    cv.put(rx, 9, f"flags: --top · cpus=N (1..{max_cpus})", t.muted)
+    if error:
+        cv.put(rx, 10, elide(f"✕ {error}", width - rx - 2), t.err, bold=True)
+    # Last, so the popup sits over the right column when a long model id
+    # pushes it that far.
+    rows: list[tuple[int, int]] = []
+    if popup:
+        px = min(token_x, width - POPUP_WIDTH - 1)
+        shown = min(POPUP_ROWS, len(popup))
+        cv.box(px, 4, POPUP_WIDTH, shown + 2, t.panel, t.surface, kind="square")
+        first = max(0, min(highlighted - POPUP_ROWS + 1, len(popup) - POPUP_ROWS))
+        for row, (value, is_default) in enumerate(popup[first : first + POPUP_ROWS]):
+            index, y = first + row, 5 + row
+            on = index == highlighted
+            if on:
+                cv.fill(px + 1, y, POPUP_WIDTH - 2, 1, t.cursor)
+            cv.put(px + 2, y, elide(value, 33), t.bright if on else t.fg, bold=on)
+            if is_default:
+                cv.put(px + 36, y, "default", t.primary)
+            rows.append((y, index))
+
+    return cv.lines(), rows
+
+
+# ---------------------------------------------------------------------------
+# hosts overview
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class HostSlot:
+    """What one machine's 3-row slot shows.
+
+    ``state`` picks the glyph: running, paused, stopped, none, offline or
+    checking. ``strip`` (one status per queued job) and ``running`` (model,
+    done, total) are known only for the host the dashboard is connected to;
+    ``None`` draws ``—``.
+    """
+
+    name: str
+    detail: str
+    via: str
+    state: str
+    status: str
+    current: bool = False
+    strip: tuple[str, ...] | None = None
+    running: tuple[str, int, int] | None = None
+
+
+#: How ``Target.via`` reads in the VIA column (13 cells wide).
+VIA_LABEL = {"ssh": "ssh config", "ssh+tailscale": "ssh+tailnet"}
+
+HOST_KEYS = [
+    [("⏎", "connect"), ("c", "check reachability")],
+    [("r", "refresh list"), ("/", "filter")],
+    [("esc", "back to queue")],
+]
+_SLOT_TOP = 4  # first slot row, under the title, header and rule
+STRIP_WIDTH = 24
+
+
+def _host_glyph(t: Tokens, state: str) -> tuple[str, str]:
+    return {
+        "running": (t.live, "●"),
+        "paused": (t.warn, "‖"),
+        "stopped": (t.muted, "○"),
+        "offline": (t.track, "○"),
+    }.get(state, (t.muted, "·"))
+
+
+def host_slots_visible(height: int) -> int:
+    """How many 3-row slots fit in a hosts view this tall."""
+    return max(1, (height - _SLOT_TOP - 3) // 3)
+
+
+def hosts_view(
+    width: int,
+    height: int,
+    t: Tokens,
+    title: str,
+    note: str,
+    slots: Sequence[HostSlot],
+    selected: int,
+    top: int,
+) -> tuple[list[Text], list[tuple[int, int]]]:
+    """Everything between the band and the footer on the hosts screen (``hosts``).
+
+    Row 0 here is screen row 1. ``note`` follows the title (``probed …``, a
+    filter, or what is happening). Slots from index ``top`` are drawn; returns
+    the lines and (row, slot index) for each drawn row, for clicks.
+    """
+    cv = Canvas(width, height, t)
+    x = cv.put(1, 0, title, t.bright, bold=True)
+    cv.put(x + 2, 0, elide(note, width - x - 3), t.muted)
+    for col, head in (
+        (3, "MACHINE"),
+        (22, "VIA"),
+        (35, "SCHEDULER"),
+        (58, "QUEUE"),
+        (84, "NOW RUNNING"),
+    ):
+        cv.put(col, 2, head, t.muted)
+    cv.put(0, 3, "─" * width, t.panel)
+
+    rows: list[tuple[int, int]] = []
+    shown = host_slots_visible(height)
+    for n, slot in enumerate(slots[top : top + shown]):
+        index, y = top + n, _SLOT_TOP + 3 * n
+        rows += [(y, index), (y + 1, index)]
+        if index == selected:
+            cv.fill(0, y, width, 2, t.cursor)
+            cv.put(0, y, "▌", t.primary)
+            cv.put(0, y + 1, "▌", t.primary)
+        colour, glyph = _host_glyph(t, slot.state)
+        cv.put(1, y, glyph, colour)
+        offline = slot.state == "offline"
+        cv.put(3, y, elide(slot.name, 18), t.muted if offline else t.fg, bold=True)
+        dx = cv.put(3, y + 1, elide(slot.detail, 50), t.muted)
+        if slot.current:
+            cv.put(dx, y + 1, "  · current", t.primary)
+        cv.put(22, y, elide(VIA_LABEL.get(slot.via, slot.via), 12), t.muted)
+        status_fg = {"running": t.live, "paused": t.warn}.get(slot.state, t.muted)
+        cv.put(35, y, elide(slot.status, 22), status_fg)
+        if slot.strip:
+            sx = 58
+            for status in slot.strip[:STRIP_WIDTH]:
+                sx = cv.put(sx, y, "▮", t.status_style(status)[0])
+            if len(slot.strip) > STRIP_WIDTH:
+                cv.put(sx, y, "…", t.muted)
+            cv.put(58, y + 1, f"{len(slot.strip)} jobs", t.muted)
+        else:
+            cv.put(58, y, "—", t.track)
+        if slot.running:
+            model, done, total = slot.running
+            paused = slot.state == "paused"
+            colour = t.warn if paused else t.live
+            label = f"{model}  (paused)" if paused else model
+            cv.put(84, y, elide(label, width - 86), t.muted if paused else t.fg)
+            bar(cv, 84, y + 1, 24, done, total, colour)
+            cv.put(110, y + 1, pct(done, total), colour)
+        elif slot.strip is not None or slot.current:
+            cv.put(84, y, "—", t.track)
+    cv.put(
+        3,
+        height - 2,
+        "▮ one block per queued job, coloured by status",
+        mix(t.muted, t.bg, 0.25),
+    )
+    return cv.lines(), rows

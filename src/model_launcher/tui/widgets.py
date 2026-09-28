@@ -20,7 +20,6 @@ from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual.binding import Binding, BindingType
-from textual.containers import Vertical
 from textual.events import (
     Click,
     MouseDown,
@@ -34,15 +33,17 @@ from textual.message import Message
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
 from textual.widget import Widget
-from textual.widgets import Button
 
 from ..core.model import Job, Snapshot
 from . import draw
-from .theme import Tokens
+from .theme import Tokens, mix
 
 
 def _tokens(widget: Widget) -> Tokens:
-    return widget.app.tokens  # type: ignore[attr-defined]
+    """The app's tokens — dimmed under an overlay, unless the widget IS one."""
+    if getattr(widget, "DIMMED", True):
+        return widget.app.tokens  # type: ignore[attr-defined]
+    return widget.app.base_tokens  # type: ignore[attr-defined]
 
 
 def _join(lines: Sequence[Text]) -> Text:
@@ -64,10 +65,12 @@ class Painted(Widget):
     repaints only if it differs from what is on screen, so a poll that changed
     nothing redraws nothing. A subclass that draws key hints records them in
     ``hints`` as (row, start, end, key), and clicking one posts
-    :class:`HintClicked`.
+    :class:`HintClicked`. Overlay widgets set ``DIMMED = False`` so they stay
+    bright while the screen beneath them is dimmed.
     """
 
     DEFAULT_CSS = "Painted { height: 1; }"
+    DIMMED = True
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -140,10 +143,12 @@ class Banner(Painted):
         message, error = self.data
         if not message:
             return [Text("")]
-        colour = t.err if error else t.warn
+        colour, surface = t.err if error else t.warn, t.surface
+        if t.dim:  # drawn without a Canvas, so dimmed here
+            colour, surface = mix(colour, t.bg, t.dim), mix(surface, t.bg, t.dim)
         text = Text(no_wrap=False, end="")
-        text.append(" ▌ ", Style(color=colour, bgcolor=t.surface))
-        text.append(message, Style(color=colour, bgcolor=t.surface))
+        text.append(" ▌ ", Style(color=colour, bgcolor=surface))
+        text.append(message, Style(color=colour, bgcolor=surface))
         return [text]
 
 
@@ -218,8 +223,11 @@ class QueueView(ScrollView, can_focus=True):
     """The queue, one line per job, with a cursor anchored on the job's key.
 
     Emits :class:`QueueView.OpenLog` on double-click and
-    :class:`QueueView.ContextRequested` on right-click.
+    :class:`QueueView.ContextRequested` on right-click. Text selection is off:
+    a double-click opens the log, and must not also select the screen.
     """
+
+    ALLOW_SELECT = False
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "cursor(-1)", "up", show=False),
@@ -337,6 +345,10 @@ class QueueView(ScrollView, can_focus=True):
         elif self._cursor >= top + height:
             self.scroll_to(y=self._cursor - height + 1, animate=False)
 
+    def cursor_screen_y(self) -> int:
+        """The screen row the selected job is drawn on."""
+        return self.region.y + self._cursor - self.scroll_offset.y
+
     def key_at(self, y: int) -> str | None:
         """Which job key is on this row of the widget."""
         index = y + self.scroll_offset.y
@@ -429,37 +441,3 @@ class LogDrawer(Painted):
         self.back = max(0, self.back - 3)
         self.refresh()
         event.stop()
-
-
-class ContextMenu(Vertical):
-    """Right-click verb menu. Same verbs as the keymap."""
-
-    class Chosen(Message):
-        def __init__(self, verb: str, key: str) -> None:
-            self.verb = verb
-            self.key = key
-            super().__init__()
-
-    ITEMS: ClassVar[list[tuple[str, str, str]]] = [
-        ("top", "Run next (move to top)", ""),
-        ("up", "Move up", ""),
-        ("down", "Move down", ""),
-        ("hold", "Hold / unhold", ""),
-        ("retry", "Retry (clear verdict)", ""),
-        ("log", "Show log", ""),
-        ("cancel", "Cancel", "-danger"),
-        ("rm", "Remove from queue", "-danger"),
-    ]
-
-    def __init__(self, key: str, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.key = key
-
-    def compose(self):
-        for verb, label, extra in self.ITEMS:
-            yield Button(label, id=f"ctx-{verb}", classes=extra)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        event.stop()
-        verb = (event.button.id or "")[len("ctx-") :]
-        self.post_message(self.Chosen(verb, self.key))

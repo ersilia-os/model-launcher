@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from textual.theme import Theme
 
@@ -154,7 +155,9 @@ class Tokens:
     """Every colour the character-grid renderer needs, for one theme mode.
 
     The names are the design handoff's (``design_handoff_model_launcher_tui``),
-    so a value can be checked against the spec by name.
+    so a value can be checked against the spec by name. ``dim`` is how far every
+    cell is blended toward ``bg`` when drawn (0 = not at all): an overlay dims
+    the screen beneath it, as the generator's ``G.dim()`` does.
     """
 
     dark: bool
@@ -173,6 +176,7 @@ class Tokens:
     band: str
     band_muted: str
     status: dict[str, tuple[str, str]] = field(default_factory=dict)
+    dim: float = 0.0
 
     def status_style(self, status: str) -> tuple[str, str]:
         """(colour, glyph) for a job status."""
@@ -223,6 +227,7 @@ def tokens(dark: bool = True) -> Tokens:
     return DARK_TOKENS if dark else LIGHT_TOKENS
 
 
+@lru_cache(maxsize=65536)
 def mix(a: str, b: str, t: float) -> str:
     """Blend colour ``a`` toward ``b`` by ``t`` (0 = a, 1 = b), as ``#RRGGBB``."""
     ca = [int(a[i : i + 2], 16) for i in (1, 3, 5)]

@@ -11,7 +11,6 @@ Numbering follows HANDOFF.md §4 exactly. Do not renumber.
 from __future__ import annotations
 
 import os
-import re
 import signal
 import time
 
@@ -363,29 +362,39 @@ def test_inv09_a_running_driver_honours_retry(scheduler):
 
 
 def test_inv09_status_load_resets_its_arrays_portably():
-    """bash 4.2 (the AWS head node) ignores `declare -gA X=()` on an existing X.
+    """bash 4.2 (the AWS head node) mishandles `declare -gA X=()` in a function.
 
-    The test suite runs a newer bash, where that line alone does empty the
-    array, so the behavioural test above cannot catch a regression here. Guard
-    the source instead: every array status_load re-declares must be unset first.
+    Without `unset` it does not empty an existing X; after `unset` it loads the
+    rows into a function-local copy, so status_load loaded NOTHING — the driver
+    looped on a job already complete in S3 and every persist_job erased the rest
+    of status.tsv. The suite runs a newer bash, where both forms work, so guard
+    the source: the ST_* arrays are declared once at file scope, and status_load
+    only empties them by plain assignment, never with `declare` or `unset`.
     """
     lib = (remote_dir() / "scheduler-lib.sh").read_text()
+    names = [
+        "ST_STATUS",
+        "ST_DONE",
+        "ST_TOTAL",
+        "ST_START",
+        "ST_FIN",
+        "ST_LOG",
+        "ST_NOTE",
+    ]
+    top = [line for line in lib.splitlines() if line.startswith("declare -A ST_")]
+    assert top, "the ST_* arrays must be declared at file scope"
+    assert all(f"{name}=()" in top[0] for name in names), top[0]
+
     body = lib[lib.index("status_load() {") :]
-    lines = [
+    code = [
         line.strip()
         for line in body[: body.index("\n}\n")].splitlines()
         if not line.strip().startswith("#")
     ]
-    declare_at = next(i for i, line in enumerate(lines) if "declare -gA" in line)
-    names = re.findall(r"(\w+)=\(\)", lines[declare_at])
-    unset_names = {
-        word
-        for line in lines[:declare_at]
-        if line.startswith("unset ")
-        for word in line.split()[1:]
-    }
-    missing = [name for name in names if name not in unset_names]
-    assert not missing, f"status_load re-declares without unsetting first: {missing}"
+    assert not [
+        line for line in code if line.startswith(("declare", "unset", "local -A"))
+    ]
+    assert all(any(f"{name}=()" in line for line in code) for name in names)
 
 
 def test_inv09_empty_log_column_does_not_swallow_the_note(scheduler):

@@ -43,17 +43,24 @@ remote/
     └── run-singularity-wave-job.sh
 ```
 
-From your laptop (`$SRC`, `$DEST` and `$H` are local variables, so keep to
-one terminal session):
+From your laptop, in the model-launcher repo root (`$SRC`, `$DEST` and `$H`
+are local variables, so keep to one terminal session):
 
 ```bash
 H=YOUR_ALIAS
 DEST=/shared/scripts/scheduler
-SRC="$(python3 -c 'from model_launcher.core.remote import remote_dir; print(remote_dir())')"
+SRC="$PWD/src/model_launcher/remote"
+
+# Refuse unless SRC really is the scheduler folder. An empty SRC turns
+# "$SRC"/ into / and rsync starts sending the whole laptop (this happened).
+[ -f "$SRC/sched-ctl.sh" ] && [ -d "$SRC/slurm" ] || { echo "not the scheduler: $SRC"; return 1 2>/dev/null || exit 1; }
 
 rsync -av --exclude '__pycache__' "$SRC"/ "$H:$DEST"/
 ssh $H "chmod +x $DEST/*.sh $DEST/slurm/*.sh"
 ```
+
+Deploy from a repo checkout, so what lands on the server is a version you can
+name: commit first.
 
 Use `rsync`, not `cp` or `scp`: it replaces files without disturbing a
 driver that is already running.
@@ -67,7 +74,7 @@ DEST=/shared/scripts/scheduler
 grep -c 'flock -n 8' "$DEST/run-model-queue.sh"                 # 1
 grep -c log_submitted_ids "$DEST/scheduler-service.sh"          # 1
 grep -c audit_log "$DEST/sched-ctl.sh"                          # 15
-grep -c 'unset ST_STATUS' "$DEST/scheduler-lib.sh"              # 1
+grep -c '^declare -A ST_STATUS' "$DEST/scheduler-lib.sh"       # 1
 ```
 
 ### 2. Configure (first time only)

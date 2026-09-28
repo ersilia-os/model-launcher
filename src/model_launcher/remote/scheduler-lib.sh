@@ -338,22 +338,28 @@ job_key() { printf '%s|%s|%s\n' "$1" "$2" "$3"; }   # model mode library
 # Keyed by model|mode|library so it survives queue reordering, queue edits and
 # driver restarts. state.tsv is a render view of (queue order x this store).
 #
-# Loaded into the ST_* associative arrays; the caller must have declared them
-# (status_load does it if they are missing).
+# Loaded into the ST_* associative arrays, declared below at file scope.
 
 status_file() { echo "${STATUS_FILE:-${LOG_DIR}/status.tsv}"; }
 
+# The ST_* arrays are declared HERE, once, at whatever scope sources this file —
+# never inside status_load. On bash 4.2 (the AWS head node) `declare -gA X=()`
+# inside a function leaves the global X empty and sends the rows written after
+# it to a function-local copy, which vanishes on return. status_load then loaded
+# nothing at all: the driver never saw a verdict (it looped on a job already
+# complete in S3), and every persist_job wrote back only its own row, erasing the
+# rest of status.tsv. bash 5 does what the code says, so no behavioural test
+# catches it; test_inv09_status_load_resets_its_arrays_portably guards the source.
+declare -A ST_STATUS=() ST_DONE=() ST_TOTAL=() ST_START=() ST_FIN=() ST_LOG=() ST_NOTE=()
+
 # Populate ST_STATUS/ST_DONE/ST_TOTAL/ST_START/ST_FIN/ST_LOG/ST_NOTE by key.
 status_load() {
-    # `unset` first, and it is not optional. On bash 4.2 (the AWS head node),
-    # `declare -gA X=()` inside a function does NOT empty an X that already
-    # exists — so the long-running driver never forgot a row deleted from the
-    # file. `retry` looked like it did nothing (the driver kept re-applying the
-    # old verdict from memory), and the next persist_job wrote every cleared row
-    # back to disk. bash 5 empties the array either way, which is why no test
-    # caught it.
-    unset ST_STATUS ST_DONE ST_TOTAL ST_START ST_FIN ST_LOG ST_NOTE
-    declare -gA ST_STATUS=() ST_DONE=() ST_TOTAL=() ST_START=() ST_FIN=() ST_LOG=() ST_NOTE=()
+    # Plain assignment, no `declare` and no `unset`: it empties the arrays
+    # declared at file scope above and keeps them associative, on bash 4.2 too.
+    # Both earlier forms broke on 4.2 — `declare -gA X=()` did not empty an
+    # existing X (a cleared `retry` came back from memory), and `unset` followed
+    # by `declare -gA X=()` loaded every row into a function-local copy.
+    ST_STATUS=(); ST_DONE=(); ST_TOTAL=(); ST_START=(); ST_FIN=(); ST_LOG=(); ST_NOTE=()
     local f; f="$(status_file)"
     [ -f "$f" ] || return 0
     local key st dn tt sa fi lg nt

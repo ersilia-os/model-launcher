@@ -2,14 +2,18 @@
    model-launcher dashboard stylesheet
    ==========================================================================
    Layout only. The dashboard regions are drawn cell by cell in draw.py with the
-   design tokens from theme.py, so colours live there, not here. What remains
-   below the dashboard block styles the Textual widgets still in use (modals,
-   the context menu) from the registered theme's variables.
+   design tokens from theme.py, so colours live there, not here. The overlays
+   (tui/overlays.py) and the hosts screen (tui/hosts.py) are drawn the same
+   way; this file only lays the regions out.
    ========================================================================== */
 
 Screen {
     layers: base overlay;
     background: $background;
+}
+/* Overlays show the dashboard through; they dim it themselves (Tokens.dim). */
+Overlay {
+    background: transparent;
 }
 
 #band, #context, #summary { height: 1; }
@@ -28,153 +32,3 @@ Screen {
 /* In the flow, not docked: a docked footer covers the last row of whatever is
    above it (the drawer's bottom border, or the last job in the queue). */
 #footer { height: 1; }
-
-/* ---- modals -------------------------------------------------------------- */
-AddScreen, ConfirmScreen, HostScreen {
-    align: center middle;
-}
-/* Wider than the other dialogs: each row carries name, transport, live status
-   and a detail column, and truncating the status is the one thing that defeats
-   the point of the list. */
-#host-box {
-    width: 96;
-    max-width: 95%;
-    height: auto;
-    max-height: 90%;
-    padding: 1 2;
-    background: $surface;
-    border: round $primary;
-}
-#host-title {
-    text-style: bold;
-    color: $primary;
-}
-#host-hint {
-    color: $text-muted;
-    padding-bottom: 1;
-}
-#host-list {
-    height: auto;
-    max-height: 20;
-    border: none;
-    background: $surface;
-}
-#add-box, #confirm-box {
-    width: 64;
-    height: auto;
-    /* Cap and scroll: five bordered inputs plus a button row overflow a 24-row
-       terminal, which puts the confirm button off-screen and unreachable. */
-    max-height: 90%;
-    overflow-y: auto;
-    padding: 1 2;
-    background: $surface;
-    border: round $primary;
-}
-/* Borderless fields: each border costs two rows, and the label already tells you
-   where the field is. Keeps the whole dialog inside a small terminal. */
-#add-box Input {
-    height: 1;
-    border: none;
-    padding: 0 1;
-    margin: 0;
-    background: $panel;
-    color: $foreground;
-}
-#add-box Input:focus { background: $primary 20%; }
-/* A Select is a compound widget: the value lives in an inner SelectCurrent. Setting
-   height on the outer one alone squeezes the inner out of view, so the field renders
-   blank however you set it. Both have to be collapsed together. */
-#add-box Select {
-    height: 1;
-    border: none;
-    margin: 0;
-    background: $panel;
-}
-#add-box Select SelectCurrent {
-    height: 1;
-    border: none;
-    padding: 0 1;
-    background: $panel;
-    color: $foreground;
-}
-#add-box Select:focus SelectCurrent { background: $primary 20%; }
-/* The dropdown itself is on the overlay layer, so it may be as tall as it likes. */
-#add-box Select SelectOverlay {
-    max-height: 12;
-    border: round $primary;
-    background: $surface;
-}
-#add-box Checkbox {
-    height: 1;
-    border: none;
-    margin: 1 0 0 0;
-    padding: 0;
-    background: $surface;
-}
-#add-title, #confirm-title {
-    text-style: bold;
-    color: $primary;
-    padding-bottom: 1;
-}
-/* No blank row between groups: six label+field pairs plus a title and buttons has
-   to fit a 24-row terminal without scrolling, and the filled field backgrounds
-   already separate one group from the next.
-   Note margin, not padding — with height:1 a padding-top pushes the text out of its
-   own box and the label vanishes.
-   height:1 also means every .field-label must stay on ONE line at this dialog's
-   width — a label that wraps loses its second row with no visible sign. */
-#add-box .field-label, #confirm-box .field-label {
-    color: $text-muted;
-    height: 1;
-    margin: 0;
-    padding: 0;
-}
-.btn-row Button {
-    height: 1;
-    border: none;
-    padding: 0 2;
-    margin-left: 1;
-    background: $panel;
-    color: $foreground;
-}
-.btn-row Button.-primary, .btn-row Button:focus {
-    background: $primary;
-    color: $background;
-    text-style: bold;
-}
-.btn-row Button.-error {
-    background: $error;
-    color: $background;
-    text-style: bold;
-}
-#confirm-detail {
-    padding: 1 0;
-    color: $foreground;
-}
-.btn-row {
-    height: auto;
-    align-horizontal: right;
-    padding-top: 1;
-}
-
-/* ---- context menu (right-click) ------------------------------------------ */
-ContextMenu {
-    layer: overlay;
-    width: 28;
-    height: auto;
-    background: $surface;
-    border: round $primary;
-    padding: 0;
-}
-ContextMenu Button {
-    width: 100%;
-    height: 1;
-    border: none;
-    background: $surface;
-    color: $foreground;
-    text-align: left;
-    padding: 0 1;
-}
-ContextMenu Button:hover { background: $primary 30%; }
-ContextMenu Button.-danger { color: $error; }
-ContextMenu Button.-danger:hover { background: $error 30%; color: $foreground; }

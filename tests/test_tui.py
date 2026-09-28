@@ -22,6 +22,12 @@ from model_launcher.tui import draw
 from model_launcher.tui import hosts as hosts_mod
 from model_launcher.tui.app import SchedulerTUI
 from model_launcher.tui.hosts import HostScreen
+from model_launcher.tui.overlays import (
+    AddScreen,
+    CommandLine,
+    ConfirmScreen,
+    MenuScreen,
+)
 from model_launcher.tui.theme import tokens
 from model_launcher.tui.widgets import KeyFooter, LogDrawer, QueueView, StatusSummary
 
@@ -118,6 +124,106 @@ def test_every_drawn_key_hint_runs_an_action():
     assert keys <= set(SchedulerTUI.HINT_ACTIONS)
 
 
+def test_confirm_needs_y_and_any_other_key_keeps_the_job(environment):
+    """No driver needed: remove is a queue edit. A stray key must never act."""
+    scheduler = environment
+    scheduler.write_queue("eos_a ersilia testlib\neos_b ersilia testlib\n")
+
+    async def scenario() -> None:
+        app = SchedulerTUI(
+            _local_runner(scheduler), refresh_interval=0.2, live_interval=0
+        )
+        async with app.run_test(size=(120, 34)) as pilot:
+            await _until(pilot, lambda: len(app.snapshot.jobs) == 2)
+            for key in ("q", "escape"):
+                await pilot.press("x")
+                assert isinstance(app.screen, ConfirmScreen)
+                assert app.tokens.dim == ConfirmScreen.DIM
+                await pilot.press(key)
+                assert not isinstance(app.screen, ConfirmScreen)
+                assert app.is_running and app.tokens.dim == 0
+            await pilot.press("x", "y")
+            await _until(pilot, lambda: len(app.snapshot.jobs) == 1)
+
+    asyncio.run(scenario())
+    assert "eos_a" not in scheduler.read_queue()
+
+
+def test_row_menu_runs_the_picked_verb(environment):
+    scheduler = environment
+    scheduler.write_queue("eos_a ersilia testlib\neos_b ersilia testlib\n")
+
+    async def scenario() -> None:
+        app = SchedulerTUI(
+            _local_runner(scheduler), refresh_interval=0.2, live_interval=0
+        )
+        async with app.run_test(size=(120, 34)) as pilot:
+            await _until(pilot, lambda: len(app.snapshot.jobs) == 2)
+            await pilot.press("shift+f10")
+            assert isinstance(app.screen, MenuScreen)
+            await pilot.press("down", "down", "enter")  # Move down
+            await _until(pilot, lambda: app.snapshot.jobs[0].model == "eos_b")
+            await pilot.press("shift+f10", "x")  # an item's own key
+            assert isinstance(app.screen, ConfirmScreen)
+            await pilot.press("escape")
+
+    asyncio.run(scenario())
+
+
+def test_command_line_parses_completes_and_validates():
+    line = CommandLine(
+        ["Enamine_Real_Sample_1.4B", "Coconut_715K"],
+        {"library": "Enamine_Real_Sample_1.4B", "wave": "1000", "queue": "cpu-queue"},
+        max_cpus=32,
+    )
+    line.type("eos4k4f_v1 sing")
+    line.accept()  # completes the mode
+    line.type("coc")
+    line.accept()  # takes the completion's spelling, not the typed case
+    line.type("--top 500")  # a flag may come before later positionals
+    assert line.text == "eos4k4f_v1 singularity Coconut_715K --top 500"
+    line.type(" cpus=64")
+    assert line.error() == "cpus must be 1..32"
+    line.backspace()
+    line.backspace()
+    line.type("16")
+    assert line.error() == ""
+    assert line.result() == {
+        "model": "eos4k4f_v1",
+        "mode": "singularity",
+        "library": "Coconut_715K",
+        "wave": "500",
+        "queue": "",
+        "cpus": "16",
+        "top": True,
+    }
+    blank = CommandLine([], {"library": "L"}, 32)
+    blank.type("m ersilia ")
+    blank.accept()  # an empty field takes its ghost default
+    assert blank.result()["library"] == "L"
+
+
+def test_add_panel_appends_to_the_queue(environment):
+    scheduler = environment
+    scheduler.write_queue("eos_a ersilia testlib\n")
+
+    async def scenario() -> None:
+        app = SchedulerTUI(
+            _local_runner(scheduler), refresh_interval=0.2, live_interval=0
+        )
+        async with app.run_test(size=(120, 34)) as pilot:
+            await _until(pilot, lambda: len(app.snapshot.jobs) == 1)
+            await pilot.press("a")
+            assert isinstance(app.screen, AddScreen)
+            await pilot.press(*"eos_new ers", "tab", "enter")  # no library yet
+            await _until(pilot, lambda: len(app.snapshot.jobs) == 2)
+
+    asyncio.run(scenario())
+    assert ["eos_new", "ersilia"] in [
+        line.split() for line in scheduler.read_queue().splitlines()
+    ]
+
+
 def test_the_picker_connects_to_the_chosen_host(environment, monkeypatch):
     scheduler = environment
     scheduler.start_driver()
@@ -145,6 +251,10 @@ def test_the_picker_connects_to_the_chosen_host(environment, monkeypatch):
             await _until(
                 pilot, lambda: app.screen.status["ai2050cluster"] == "unreachable"
             )
+            await pilot.press("slash", "a", "i")
+            assert [row.name for row in app.screen._visible()] == ["ai2050cluster"]
+            await pilot.press("escape")  # clears the filter, stays on the screen
+            assert len(app.screen._visible()) == 2
             await pilot.press(
                 "enter"
             )  # nothing remembered yet: "this machine" is first

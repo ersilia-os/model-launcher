@@ -291,6 +291,20 @@ resolve_sel() {  # $1 = selector
     [ "$found" -eq 1 ]
 }
 
+# 0-based index of the block with exactly this model, mode and library (as
+# written in the queue, before alias resolution). First match if a hand-edited
+# queue repeats a line.
+find_block() {  # $1 = model, $2 = mode, $3 = library
+    local i
+    for i in "${!BLK_MODEL[@]}"; do
+        if [ "${BLK_MODEL[i]}" = "$1" ] && [ "${BLK_MODE[i]}" = "$2" ] \
+            && [ "${BLK_LIB[i]}" = "$3" ]; then
+            echo "$i"; return 0
+        fi
+    done
+    return 1
+}
+
 # Set or clear the `hold` flag on a block, leaving unknown flags untouched.
 set_hold_flag() {  # $1 = index, $2 = 1|0
     local i="$1" want="$2" f out=""
@@ -396,18 +410,22 @@ apply_sel() {  # $1 = mutator fn name, rest = selectors
     local sels=("$@")
     _do() {
         load_blocks
-        local sel idx rc=0
-        # Resolve every selector to a MODEL first: indices shift as we mutate, but
-        # a model id stays valid across the whole batch.
-        local models=()
+        local sel idx k rc=0
+        # Resolve every selector to the ROW it names first: indices shift as we
+        # mutate, so each row is remembered by its model, mode and library as
+        # written, and found again by all three. Not by model alone: the same
+        # model may be queued against two libraries, and re-resolving `2` via its
+        # model id would act on the FIRST of them — the wrong job.
+        local s_model=() s_mode=() s_lib=()
         for sel in "${sels[@]}"; do
             if ! idx="$(resolve_sel "$sel" | head -n 1)"; then
                 echo "ERROR: no queue entry matches '$sel'" >&2; rc=1; continue
             fi
-            models+=("${BLK_MODEL[idx]}")
+            s_model+=("${BLK_MODEL[idx]}"); s_mode+=("${BLK_MODE[idx]}")
+            s_lib+=("${BLK_LIB[idx]}")
         done
-        for sel in "${models[@]}"; do
-            idx="$(resolve_sel "$sel" | head -n 1)" || continue
+        for k in "${!s_model[@]}"; do
+            idx="$(find_block "${s_model[k]}" "${s_mode[k]}" "${s_lib[k]}")" || continue
             "$fn" "$idx" || rc=1
         done
         write_blocks
@@ -427,10 +445,20 @@ mut_rm() {
         NF[j]="${BLK_FLAGS[k]}"
         j=$((j + 1))
     done
-    BLK_PRE=("${NP[@]+"${NP[@]}"}"); BLK_MODEL=("${NM[@]+"${NM[@]}"}")
-    BLK_MODE=("${NMD[@]+"${NMD[@]}"}"); BLK_LIB=("${NL[@]+"${NL[@]}"}")
-    BLK_WAVE=("${NW[@]+"${NW[@]}"}"); BLK_QUEUE=("${NQ[@]+"${NQ[@]}"}")
-    BLK_FLAGS=("${NF[@]+"${NF[@]}"}")
+    # Not `("${NP[@]+"${NP[@]}"}")`: on bash 4.2 (the head node) that idiom drops
+    # EMPTY elements, and most prefixes, waves, partitions and flags are empty.
+    # The arrays then fall out of step — write_blocks died on `BLK_PRE[i]: unbound
+    # variable` after printing "removed:", leaving the queue unchanged. A plain
+    # "${NP[@]}" keeps empty elements everywhere; it is only unsafe under `set -u`
+    # when the array has NO elements, which is the one case handled apart.
+    if [ "$j" -eq 0 ]; then
+        BLK_PRE=(); BLK_MODEL=(); BLK_MODE=(); BLK_LIB=()
+        BLK_WAVE=(); BLK_QUEUE=(); BLK_FLAGS=()
+    else
+        BLK_PRE=("${NP[@]}"); BLK_MODEL=("${NM[@]}"); BLK_MODE=("${NMD[@]}")
+        BLK_LIB=("${NL[@]}"); BLK_WAVE=("${NW[@]}"); BLK_QUEUE=("${NQ[@]}")
+        BLK_FLAGS=("${NF[@]}")
+    fi
 }
 mut_top()    { echo "moved ${BLK_MODEL[$1]} to position 1"; move_block "$1" 0; }
 mut_up()     { local t=$(( $1 - 1 )); [ "$t" -lt 0 ] && t=0

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import socket
+from dataclasses import replace
 from typing import ClassVar
 
 from textual import on, work
@@ -32,14 +33,13 @@ from ..core.model import (
 from ..core.runner import Runner, RunnerError
 from ..core.target import Resolution
 from . import draw
-from .dialogs import AddScreen, ConfirmScreen
 from .hosts import HostScreen
+from .overlays import AddScreen, ConfirmScreen, MenuScreen
 from .theme import DARK_THEME, LIGHT_THEME, THEMES, Tokens, tokens
 from .widgets import (
     Band,
     Banner,
     ContextLine,
-    ContextMenu,
     HintClicked,
     KeyFooter,
     LogDrawer,
@@ -89,6 +89,7 @@ class SchedulerTUI(App):
         Binding("plus,equals_sign", "log_size(2)", "taller log", show=False),
         Binding("minus", "log_size(-2)", "shorter log", show=False),
         Binding("escape", "close_log", "close log", show=False),
+        Binding("menu,shift+f10", "context_menu", "row menu", show=False),
         Binding("R", "recount", "recount from S3"),
         Binding("D", "toggle_dark_theme", "light/dark theme"),
         Binding("q", "quit", "quit"),
@@ -156,12 +157,29 @@ class SchedulerTUI(App):
         self._log_shown: tuple | None = None
         self._log_height = 14
         self._dark = True
-        self._menu: ContextMenu | None = None
 
     @property
     def tokens(self) -> Tokens:
-        """Cell colours for the current theme, read by every painted widget."""
+        """Cell colours for the current theme, read by every painted widget.
+
+        Dimmed by the overlay on top, if any: an overlay declares how far the
+        screen beneath it fades (``Overlay.DIM``).
+        """
+        base = tokens(self._dark)
+        top = self.screen_stack[-1] if self.screen_stack else None
+        dim = getattr(top, "DIM", 0.0)
+        return replace(base, dim=dim) if dim else base
+
+    @property
+    def base_tokens(self) -> Tokens:
+        """The tokens undimmed, for an overlay's own widgets."""
         return tokens(self._dark)
+
+    def refresh_base(self) -> None:
+        """Repaint the dashboard, as after an overlay opens or closes."""
+        if self.screen_stack:
+            for widget in self.screen_stack[0].query("Painted, QueueView"):
+                widget.refresh()
 
     # ------------------------------------------------------------------
     # layout
@@ -458,8 +476,19 @@ class SchedulerTUI(App):
                 args.append("--top")
             self.run_ctl(*args)
 
+        defaults = {
+            "library": snap.default_library,
+            "wave": snap.driver_info.get("default_wave_size", ""),
+            "queue": snap.driver_info.get("default_queue", ""),
+        }
         self.push_screen(
-            AddScreen(snap.libraries, snap.default_library, snap.max_cpus_per_task),
+            AddScreen(
+                snap.libraries,
+                defaults,
+                snap.max_cpus_per_task,
+                where=f"{self._host_label()} · {snap.dispatch}",
+                sif_dir=snap.sif_dir,
+            ),
             on_close,
         )
 
@@ -475,10 +504,11 @@ class SchedulerTUI(App):
         self.push_screen(
             ConfirmScreen(
                 "Remove from the queue?",
-                f"{job.model} ({job.mode}) on {job.library}\n\n"
                 "The queue line is deleted. Results already in S3 are untouched, "
                 "and re-adding it later resumes where it left off.",
-                ok_label="Remove",
+                keep="keep it",
+                ok="remove it",
+                subject=(job.model, job.library),
             ),
             on_close,
         )
@@ -513,26 +543,34 @@ class SchedulerTUI(App):
         if not job:
             return
         if job.is_running:
-            title = "Cancel the RUNNING model?"
-            detail = (
-                f"{job.model} on {job.library}\n\n"
+            screen = ConfirmScreen(
+                "Cancel the RUNNING model?",
                 "Its in-flight SLURM array will be scancel'd and the orchestrator "
                 "killed. Chunks already written to S3 are kept, so a later retry "
-                "resumes from there. The queue then moves to the next model."
+                "resumes from there. The queue then moves to the next model.",
+                keep="keep running",
+                ok="cancel the job",
+                subject=(job.model, job.library),
+                kept=(job.done, job.total),
             )
         else:
-            title = "Hold this job?"
-            detail = (
-                f"{job.model} is {job.status}, not running.\n\n"
-                "It will be marked `hold` in the queue file so the driver skips it. "
-                "Use Remove to drop it entirely."
+            screen = ConfirmScreen(
+                "Hold this job?",
+                f"It is {job.status}, not running, so it will be marked `hold` in "
+                "the queue file and the driver will skip it. Use Remove to drop "
+                "it entirely.",
+                keep="keep it",
+                ok="hold it",
+                subject=(job.model, job.library),
+                tone="warn",
+                glyph="‖",
             )
 
         def on_close(confirmed: bool) -> None:
             if confirmed:
                 self.run_ctl("cancel", self._sel(job))
 
-        self.push_screen(ConfirmScreen(title, detail, ok_label="Do it"), on_close)
+        self.push_screen(screen, on_close)
 
     def action_pause(self) -> None:
         self.run_ctl("resume" if self.snapshot.paused else "pause")
@@ -559,7 +597,10 @@ class SchedulerTUI(App):
                 "Stop after the current model?",
                 "The driver finishes the model it is running, then exits. "
                 "Nothing in flight is killed.",
-                ok_label="Arm it",
+                keep="keep going",
+                ok="arm it",
+                tone="warn",
+                glyph="◐",
             ),
             on_close,
         )
@@ -711,19 +752,31 @@ class SchedulerTUI(App):
 
     @on(QueueView.ContextRequested)
     def _on_context(self, event: QueueView.ContextRequested) -> None:
-        self._close_menu()
-        menu = ContextMenu(event.key)
-        self._menu = menu
-        self.mount(menu)
-        menu.styles.offset = (event.x, min(event.y, max(0, self.size.height - 10)))
+        # Just below the pointer, so the row it was opened on stays visible.
+        self._open_menu(event.key, event.x, event.y + 1)
 
-    @on(ContextMenu.Chosen)
-    def _on_context_chosen(self, event: ContextMenu.Chosen) -> None:
-        self._close_menu()
-        job = self.snapshot.find_by_key(event.key)
+    def action_context_menu(self) -> None:
+        """Open the row menu from the keyboard, just below the selected row."""
+        table = self.query_one("#table", QueueView)
+        if table.selected_key:
+            self._open_menu(table.selected_key, 26, table.cursor_screen_y() + 1)
+
+    def _open_menu(self, key: str, x: int, y: int) -> None:
+        job = self.snapshot.find_by_key(key)
         if job is None:
             return
-        verb = event.verb
+
+        def on_close(verb: str | None) -> None:
+            if verb:
+                self._run_verb(verb, key)
+
+        self.push_screen(MenuScreen(job.model, x, y), on_close)
+
+    def _run_verb(self, verb: str, key: str) -> None:
+        """Act on a verb picked from the row menu."""
+        job = self.snapshot.find_by_key(key)
+        if job is None:
+            return
         if verb == "log":
             self._log_model = job.key
             self.show_log = True
@@ -739,11 +792,6 @@ class SchedulerTUI(App):
             self.action_remove()
             return
         self.run_ctl(verb, self._sel(job))
-
-    def _close_menu(self) -> None:
-        if self._menu is not None:
-            self._menu.remove()
-            self._menu = None
 
     @on(LogDrawer.Dragged)
     def _on_log_dragged(self, event: LogDrawer.Dragged) -> None:
