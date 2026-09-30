@@ -18,6 +18,7 @@ from .. import __version__
 from ..branding import console, style_help
 from ..core.hosts import available_targets
 from .commands.check import check
+from .commands.setup import setup
 from .commands.tui import tui
 from .render import no_targets_message, targets_table
 
@@ -112,5 +113,6 @@ def cli(ctx, host, ctl, log_dir, queue_file, s3_bucket, ssh_opt, who):
 
 cli.add_command(tui)
 cli.add_command(check)
+cli.add_command(setup)
 
 __all__ = ["cli"]

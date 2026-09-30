@@ -821,7 +821,9 @@ cmd_dump() {
     # Refreshed from S3 on a --live dump, served from cache otherwise.
     {
         list_libraries ${live:+refresh}
-        for cand in "${SCRIPT_DIR}/library-aliases.sh" \
+        # The alias table names the cluster's S3 libraries; a serve machine has
+        # only the folders under DATA_DIR/input, which list_libraries gave above.
+        store_is_local || for cand in "${SCRIPT_DIR}/library-aliases.sh" \
                     /shared/scripts/library-aliases.sh \
                     "${SCRIPT_DIR}/../../AWS_templates/library-aliases.sh" \
                     /shared/scripts/AWS_templates/library-aliases.sh; do

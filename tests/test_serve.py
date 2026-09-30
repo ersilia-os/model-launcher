@@ -253,3 +253,11 @@ def test_a_conf_in_the_user_config_folder_is_found_without_being_named(
     )
     assert "dispatch=serve" in proc.stdout
     assert f"data_dir={data_dir}" in proc.stdout
+
+
+def test_a_serve_machine_offers_only_its_own_library_folders(scheduler, data_dir):
+    """The alias table names the cluster's S3 libraries, which are not here."""
+    proc = scheduler.ctl("dump", **_serve_env(data_dir))
+    from model_launcher.core.model import parse_dump
+
+    assert parse_dump(proc.stdout).libraries == ["lib1"]

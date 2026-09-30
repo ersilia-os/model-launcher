@@ -131,9 +131,22 @@ It should show `driver RUNNING` and your queue.
 
 ## A machine without SLURM (`DISPATCH=serve`)
 
-A workstation that runs models with `ersilia serve` needs no copy step and no
-AWS credentials. `pip install` the package on it: the scripts ship inside, and
-`check` and the dashboard find them there.
+A workstation or a Mac that runs models with the ersilia CLI needs no copy step
+and no AWS credentials. On that machine:
+
+```bash
+pip install git+https://github.com/ersilia-os/model-launcher.git
+model-launcher setup
+```
+
+`setup` opens a screen for the settings below, checks them, saves the conf, and
+can install the driver as a service: systemd on Linux (asks for sudo), a
+per-user LaunchAgent on macOS (no sudo). The rest of this section is what it
+does, for doing it by hand.
+
+**On a Mac**, first `brew install bash flock`, and install and start Docker
+Desktop. For other computers to reach the Mac (`--host`), turn on Remote Login
+in System Settings. The LaunchAgent runs while you are logged in.
 
 Progress is counted from a local folder instead of S3. It has the bucket's
 layout:
@@ -164,14 +177,16 @@ What the machine needs:
 
 - An ersilia recent enough that every error exits 1 (current `master`). An
   older one can report a failed run as success.
-- The user running the driver in the `docker` group, for models served from
-  DockerHub.
+- Docker, for models served from DockerHub: on Linux the user running the
+  driver in the `docker` group, on macOS Docker Desktop running.
 - `ERSILIA_BIN` set if `ersilia` is only on PATH inside a conda env. The
   driver refuses to start if it can't find it.
 
-Install the service as in step 3. On `serve`, the installer needs no SLURM
-commands, and it writes `HOME` into the unit, because ersilia keeps its models
-under `~/eos`.
+Install the service as in step 3, or let `setup` do it. On `serve`, the
+installer needs no SLURM commands, and it writes `HOME` into the unit, because
+ersilia keeps its models under `~/eos`. On macOS it writes
+`~/Library/LaunchAgents/io.ersilia.model-launcher.plist` instead; stop it with
+`launchctl bootout gui/$(id -u)/io.ersilia.model-launcher`.
 
 A cancel closes the model: the Docker container is stopped, not left running.
 A missing or relative `DATA_DIR` is refused, so it can't silently mark every
