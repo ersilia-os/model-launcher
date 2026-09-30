@@ -972,3 +972,173 @@ def hosts_view(
         mix(t.muted, t.bg, 0.25),
     )
     return cv.lines(), rows
+
+
+# ---------------------------------------------------------------------------
+# setup: this computer as a host
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class SetupField:
+    """One setting on the setup screen: a label, what is typed, and help."""
+
+    label: str
+    value: str
+    ghost: str = ""
+    help: str = ""
+
+
+SETUP_KEYS = [
+    [("tab", "next"), ("shift+tab", "back")],
+    [("←/→", "start")],
+    [("^s", "save"), ("esc", "cancel")],
+    # Not `D` as on the dashboard: here letters are typed into paths.
+    [("^t", "theme")],
+]
+_SETUP_TOP = 4  # first field row
+_SETUP_CHECKS_X = 76
+#: What a check's level looks like in the checks box.
+_CHECK_GLYPH = {"ok": "✓", "note": "·", "warn": "!", "bad": "✕"}
+
+
+def setup_rows(index: int) -> tuple[int, int]:
+    """The label and value rows of field ``index`` on the setup screen."""
+    y = _SETUP_TOP + 3 * index
+    return y, y + 1
+
+
+def setup_view(
+    width: int,
+    height: int,
+    t: Tokens,
+    fields: Sequence[SetupField],
+    focus: int,
+    starts: Sequence[str],
+    start: int,
+    popup: Sequence[str],
+    highlighted: int,
+    checks: Sequence[tuple[str, str]],
+    checking: bool,
+    error: str,
+    note: str = "",
+) -> tuple[list[Text], list[tuple[int, int, int, tuple[str, int]]]]:
+    """Everything between the band and the footer on the setup screen.
+
+    ``focus`` is the focused field; ``len(fields)`` focuses the start choice.
+    ``popup`` completes the focused field (``highlighted`` is -1 until ↓ enters
+    it). ``checks`` are (level, text) lines, ``checking`` shows that the slow
+    ones are still running, ``error`` why ``^s`` refused, ``note`` a quiet line
+    at the bottom (where the settings are saved). Returns the lines and
+    the click targets as (row, start column, end column, (kind, index)), kind
+    being ``field``, ``start`` or ``popup``.
+    """
+    cv = Canvas(width, height, t)
+    targets: list[tuple[int, int, int, tuple[str, int]]] = []
+    x = cv.put(2, 1, "Set up this computer to run models", t.bright, bold=True)
+    cv.put(x + 3, 1, "ersilia CLI · input and results on this disk", t.muted)
+
+    left = _SETUP_CHECKS_X - 6
+    ghost_fg = mix(t.muted, t.bg, 0.3)
+    for i, field in enumerate(fields):
+        label_y, value_y = setup_rows(i)
+        on = i == focus
+        if on:
+            cv.put(2, label_y, "▌", t.primary)
+            cv.put(2, value_y, "▌", t.primary)
+        cv.put(4, label_y, field.label, t.bright if on else t.muted, bold=on)
+        if on and field.help:
+            cv.put(
+                4 + len(field.label) + 2,
+                label_y,
+                elide(field.help, left - len(field.label) - 2),
+                t.muted,
+            )
+        shown = elide(field.value, left - 2) if field.value else ""
+        vx = cv.put(4, value_y, shown, t.fg if field.value else ghost_fg)
+        if not field.value:
+            vx = cv.put(4, value_y, elide(field.ghost, left - 2), ghost_fg)
+        if on:
+            cv.put(
+                min(vx, 4 + left - 1) if field.value else 4,
+                value_y,
+                " " if field.value else (field.ghost[:1] or " "),
+                ghost_fg,
+                t.primary,
+            )
+        targets.append((label_y, 0, _SETUP_CHECKS_X - 2, ("field", i)))
+        targets.append((value_y, 0, _SETUP_CHECKS_X - 2, ("field", i)))
+
+    sy = _SETUP_TOP + 3 * len(fields)
+    on = focus == len(fields)
+    if on:
+        cv.put(2, sy, "▌", t.primary)
+        cv.put(2, sy + 1, "▌", t.primary)
+    cv.put(4, sy, "Start the driver", t.bright if on else t.muted, bold=on)
+    if on:
+        cv.put(22, sy, "←/→ to choose", t.muted)
+    x = 4
+    for i, label in enumerate(starts):
+        chosen = i == start
+        begin = x
+        x = cv.put(
+            x, sy + 1, "● " if chosen else "○ ", t.primary if chosen else t.muted
+        )
+        x = cv.put(x, sy + 1, label, t.fg if chosen else t.muted, bold=chosen)
+        targets.append((sy + 1, begin, x, ("start", i)))
+        x += 4
+    targets.append((sy, 0, _SETUP_CHECKS_X - 2, ("field", len(fields))))
+
+    if error:
+        cv.put(4, sy + 3, elide(f"✕ {error}", left), t.err, bold=True)
+    if note:
+        cv.put(4, height - 2, elide(note, left), mix(t.muted, t.bg, 0.25))
+
+    # the checks, on the right
+    cx, cw = _SETUP_CHECKS_X, width - _SETUP_CHECKS_X - 2
+    lines: list[tuple[str, str]] = []
+    for level, text in checks:
+        for n, part in enumerate(wrap(text, cw - 6)):
+            lines.append((level if n == 0 else "", part))
+    if checking:
+        lines.append(("checking", "checking Docker and running drivers…"))
+    box_h = min(height - _SETUP_TOP - 1, len(lines) + 2)
+    cv.box(
+        cx,
+        _SETUP_TOP - 1,
+        cw,
+        max(3, box_h),
+        t.panel,
+        title=" checks ",
+        title_fg=t.muted,
+    )
+    colour = {"ok": t.live, "note": t.primary, "warn": t.warn, "bad": t.err}
+    for row, (level, part) in enumerate(lines[: box_h - 2]):
+        y = _SETUP_TOP + row
+        if level == "checking":
+            cv.put(cx + 2, y, "…", t.muted)
+            cv.put(cx + 4, y, elide(part, cw - 6), t.muted)
+            continue
+        if level:
+            cv.put(
+                cx + 2,
+                y,
+                _CHECK_GLYPH.get(level, "·"),
+                colour.get(level, t.muted),
+                bold=True,
+            )
+        fg = t.err if level == "bad" else t.fg
+        cv.put(cx + 4, y, elide(part, cw - 6), fg)
+
+    # the completion popup, last so it sits over whatever is below the field
+    if popup and focus < len(fields):
+        _, value_y = setup_rows(focus)
+        pw, shown = min(left, 66), min(POPUP_ROWS, len(popup))
+        cv.box(4, value_y + 1, pw, shown + 2, t.panel, t.surface, kind="square")
+        first = max(0, min(highlighted - POPUP_ROWS + 1, len(popup) - POPUP_ROWS))
+        for row, value in enumerate(popup[first : first + POPUP_ROWS]):
+            index, y = first + row, value_y + 2 + row
+            on = index == highlighted
+            if on:
+                cv.fill(5, y, pw - 2, 1, t.cursor)
+            cv.put(6, y, elide(value, pw - 4), t.bright if on else t.fg, bold=on)
+            targets.insert(0, (y, 4, 4 + pw, ("popup", index)))
+    return cv.lines(), targets
