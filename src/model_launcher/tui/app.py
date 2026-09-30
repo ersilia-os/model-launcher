@@ -90,7 +90,7 @@ class SchedulerTUI(App):
         Binding("minus", "log_size(-2)", "shorter log", show=False),
         Binding("escape", "close_log", "close log", show=False),
         Binding("menu,shift+f10", "context_menu", "row menu", show=False),
-        Binding("R", "recount", "recount from S3"),
+        Binding("R", "recount", "recount progress"),
         Binding("D", "toggle_dark_theme", "light/dark theme"),
         Binding("q", "quit", "quit"),
     ]
@@ -320,7 +320,7 @@ class SchedulerTUI(App):
         self._render_log()
         if self._recounting and snapshot.counts_are_live:
             self._recounting = False
-            self.notify("S3 recount done.", timeout=3)
+            self.notify(f"{snapshot.store} recount done.", timeout=3)
 
     # ------------------------------------------------------------------
     # rendering
@@ -452,6 +452,7 @@ class SchedulerTUI(App):
     # ------------------------------------------------------------------
     def action_add(self) -> None:
         snap = self.snapshot
+        serve = snap.dispatch == "serve"
 
         def on_close(result: dict | None) -> None:
             if not result:
@@ -487,7 +488,9 @@ class SchedulerTUI(App):
                 defaults,
                 snap.max_cpus_per_task,
                 where=f"{self._host_label()} · {snap.dispatch}",
-                sif_dir=snap.sif_dir,
+                # serve runs everything through the ersilia CLI: no SIF, no singularity.
+                sif_dir="" if serve else snap.sif_dir,
+                modes=["ersilia"] if serve else None,
             ),
             on_close,
         )
@@ -504,8 +507,8 @@ class SchedulerTUI(App):
         self.push_screen(
             ConfirmScreen(
                 "Remove from the queue?",
-                "The queue line is deleted. Results already in S3 are untouched, "
-                "and re-adding it later resumes where it left off.",
+                f"The queue line is deleted. Results already in {self.snapshot.store} "
+                "are untouched, and re-adding it later resumes where it left off.",
                 keep="keep it",
                 ok="remove it",
                 subject=(job.model, job.library),
@@ -545,9 +548,17 @@ class SchedulerTUI(App):
         if job.is_running:
             screen = ConfirmScreen(
                 "Cancel the RUNNING model?",
-                "Its in-flight SLURM array will be scancel'd and the orchestrator "
-                "killed. Chunks already written to S3 are kept, so a later retry "
-                "resumes from there. The queue then moves to the next model.",
+                (
+                    "The model is closed and its job stopped. Chunks already "
+                    "written to disk are kept, so a later retry resumes from there. "
+                    "The queue then moves to the next model."
+                )
+                if self.snapshot.dispatch == "serve"
+                else (
+                    "Its in-flight SLURM array will be scancel'd and the orchestrator "
+                    "killed. Chunks already written to S3 are kept, so a later retry "
+                    "resumes from there. The queue then moves to the next model."
+                ),
                 keep="keep running",
                 ok="cancel the job",
                 subject=(job.model, job.library),
@@ -614,7 +625,8 @@ class SchedulerTUI(App):
         """
         self._recounting = True
         self.notify(
-            f"Recounting {len(self.snapshot.jobs)} row(s) from S3 — this takes a moment.",
+            f"Recounting {len(self.snapshot.jobs)} row(s) from {self.snapshot.store}"
+            " — this takes a moment.",
             timeout=4,
         )
         if self.snapshot.driver_alive and not self.snapshot.driver_legacy:

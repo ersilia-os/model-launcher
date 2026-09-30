@@ -8,8 +8,8 @@ it, and only falls back to a default path when no driver is running.
 
 This runs *before* ``sched-ctl.sh`` (whose path is the thing being found), so
 it is a small self-contained bash probe rather than a ctl verb. It is not part
-of the deployed payload and needs nothing on the target beyond bash and
-``/proc``.
+of the deployed payload and needs nothing on the target beyond a POSIX-ish
+userland and any bash, 3.2 included.
 """
 
 from __future__ import annotations
@@ -22,22 +22,51 @@ from .runner import LocalRunner, Runner, RunnerError, SshRunner
 
 #: One line per scheduler instance: ``pid<TAB>log_dir<TAB>script_dir``.
 #:
-#: * Candidates come from ``pgrep``, which also matches processes that merely
+#: Two sources, deduplicated by ``LOG_DIR`` (one LOG_DIR is one instance):
+#:
+#: * **The registry** every driver writes while it runs
+#:   (``~/.config/model-launcher/drivers/<pid>``, see ``registry_add`` in
+#:   scheduler-lib.sh). It works on every OS, and it is the only source on
+#:   macOS, which has no ``/proc``.
+#: * **/proc** (Linux), for a driver started before the registry existed.
+#:   Candidates come from ``pgrep``, which also matches processes that merely
 #:   *mention* the driver — the tmux server and the ``sh -c "... | tee"``
 #:   wrapper start-scheduler-tmux.sh launches. Those do not carry ``LOG_DIR``
-#:   in their own environment (the driver exports it; the wrapper only passes
-#:   it inline), so a candidate without one is skipped.
-#: * The driver's ``$(...)`` subshells share its argv and environment, so
-#:   results are deduplicated by ``LOG_DIR`` — one LOG_DIR is one instance.
-#: * ``script_dir`` comes from ``driver.info`` when its pid is alive (a crashed
-#:   driver can leave a stale one behind), else from the script path in the
-#:   process's own argv — the only source for a pre-upgrade driver.
+#:   in their own environment, so a candidate without one is skipped.
+#:   ``script_dir`` comes from ``driver.info`` when its pid is alive, else from
+#:   the script path in the process's own argv.
+#:
+#: Over SSH this runs as ``bash -s`` — on a Mac that is /bin/bash 3.2, so it
+#: must not use anything newer (no associative arrays).
 PROBE = r"""
-declare -A seen
+seen='
+'
+emit() {
+    case "$seen" in *"
+$2
+"*) return 0 ;; esac
+    seen="${seen}$2
+"
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3"
+}
+
+reg="${SCHED_REGISTRY_DIR:-${HOME:-/tmp}/.config/model-launcher/drivers}"
+for f in "$reg"/*; do
+    [ -f "$f" ] || continue
+    pid="${f##*/}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    kill -0 "$pid" 2>/dev/null || continue
+    ps -o command= -p "$pid" 2>/dev/null | grep -q 'run-model-queue\.sh' || continue
+    log_dir="$(sed -n 's/^log_dir=//p' "$f" | head -n 1)"
+    script_dir="$(sed -n 's/^script_dir=//p' "$f" | head -n 1)"
+    [ -n "$log_dir" ] && [ -n "$script_dir" ] || continue
+    emit "$pid" "$log_dir" "$script_dir"
+done
+
+[ -d /proc/self ] || exit 0
 for pid in $(pgrep -u "$(id -u)" -f 'run-model-queue\.sh' 2>/dev/null); do
     log_dir="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^LOG_DIR=//p' | head -n 1)"
     [ -n "$log_dir" ] || continue
-    [ -z "${seen[$log_dir]:-}" ] || continue
     script_dir=
     info="$log_dir/driver.info"
     if [ -f "$info" ]; then
@@ -56,8 +85,7 @@ for pid in $(pgrep -u "$(id -u)" -f 'run-model-queue\.sh' 2>/dev/null); do
         case "$script" in /*) ;; *) script="$(readlink "/proc/$pid/cwd")/$script" ;; esac
         script_dir="$(cd "$(dirname "$script")" 2>/dev/null && pwd)" || continue
     fi
-    seen[$log_dir]=1
-    printf '%s\t%s\t%s\n' "$pid" "$log_dir" "$script_dir"
+    emit "$pid" "$log_dir" "$script_dir"
 done
 exit 0
 """

@@ -3,7 +3,10 @@
 # Per-machine defaults for the scheduler.
 # =============================================================================
 # Copy this file to `scheduler.conf` next to sched-ctl.sh and run-model-queue.sh
-# on the target machine, then edit the values for that machine. Everything here
+# on the target machine, then edit the values for that machine. On a machine
+# where the package is pip-installed, put it at
+# ~/.config/model-launcher/scheduler.conf instead: `pip install -U` replaces the
+# folder next to the scripts, and every script looks there next. Everything here
 # is optional — a fresh checkout with no scheduler.conf at all runs with the
 # built-in defaults below, unchanged from before this file existed.
 #
@@ -43,8 +46,19 @@
 # How this machine runs models: `slurm` (sbatch wave orchestrators, the AWS
 # cluster) or `serve` (ersilia serve/run, a plain remote computer with no
 # scheduler). Published in `dump`'s runtime section so a client can tell the
-# two apart; only `slurm` is implemented as of this file's version.
+# two apart. It also picks where progress is counted: `slurm` lists S3_BUCKET,
+# `serve` lists DATA_DIR. A serve job runs `ersilia fetch`, `serve`, one `run`
+# per chunk and `close` (serve/run-ersilia-serve.sh); only mode `ersilia` exists.
 # DISPATCH="${DISPATCH:-slurm}"
+
+# serve only: the local folder holding the input chunks and the results, laid
+# out like the bucket: input/<library>/<library>_chunk_<N>.csv and
+# output/<library>/<model>/. Must be an absolute path.
+# DATA_DIR="${DATA_DIR:-}"
+
+# serve only: the ersilia CLI each job runs. Point it at a conda env's binary if
+# ersilia is not on the service's PATH, e.g. /home/<user>/miniconda3/envs/ersilia/bin/ersilia
+# ERSILIA_BIN="${ERSILIA_BIN:-ersilia}"
 
 # Where the wave orchestrators (submit-ersilia-waves.sh, etc.) live, if not
 # in the packaged `slurm/` directory beside this script. Set this only for a

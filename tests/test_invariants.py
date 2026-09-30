@@ -84,7 +84,6 @@ def test_inv02_hold_does_outrank_pending(scheduler):
 # --- 3. control messages are drained at startup, not just in the loop -------
 
 
-@pytest.mark.linux_only
 def test_inv03_stale_shutdown_is_discarded_at_startup(scheduler):
     """A `shutdown` left over from a previous driver must not kill the next one.
 
@@ -145,7 +144,6 @@ def test_inv03_a_command_posted_the_instant_driver_info_appears_is_never_discard
 # --- 4. kill the orchestrator BEFORE scancel --------------------------------
 
 
-@pytest.mark.linux_only
 def test_inv04_orchestrator_is_dead_before_scancel_runs(scheduler):
     """Reverse this order and cancelling a wave spawns a fresh one.
 
@@ -157,7 +155,7 @@ def test_inv04_orchestrator_is_dead_before_scancel_runs(scheduler):
     scancel = scheduler.stub_bin / "scancel"
     scancel.write_text(
         "#!/bin/bash\n"
-        'n=$(pgrep -c -f "sleep 600" 2>/dev/null || echo 0)\n'
+        'n=$(pgrep -f "sleep $SCHED_FAKE_DURATION" | wc -l | tr -d " ")\n'
         'printf "%s alive=%s\\n" "$*" "$n" >> "$STUB_CALL_LOG.scancel"\n'
     )
     scancel.chmod(0o755)
@@ -186,7 +184,6 @@ def test_inv04_orchestrator_is_dead_before_scancel_runs(scheduler):
 # --- 5. the driver must kill its orchestrator on exit -----------------------
 
 
-@pytest.mark.linux_only
 def test_inv05_driver_takes_the_orchestrator_down_with_it(scheduler):
     """An orphaned orchestrator keeps submitting waves.
 
@@ -344,7 +341,6 @@ def test_inv09_retry_clears_the_stored_verdict(scheduler):
     assert scheduler.dump().find("eos_x").status == "pending"
 
 
-@pytest.mark.linux_only
 def test_inv09_a_running_driver_honours_retry(scheduler):
     """`retry` must reach a LIVE driver, not just a fresh ctl process.
 
@@ -459,7 +455,6 @@ def test_inv10_comments_travel_with_their_job(scheduler):
 # --- 11. the client never calls AWS -----------------------------------------
 
 
-@pytest.mark.linux_only
 def test_inv11_plain_dump_never_counts_progress_from_s3(scheduler):
     """The 2s refresh tick must not recount progress, or the dashboard costs money and time.
 
@@ -561,7 +556,6 @@ def test_inv13_invalid_cpus_is_skipped_not_dispatched(scheduler):
 # --- 14. stale `running` rows get reclaimed at startup ----------------------
 
 
-@pytest.mark.linux_only
 def test_inv14_interrupted_job_is_reclaimed(scheduler):
     """A driver that died mid-job leaves a row marked `running`.
 
@@ -623,13 +617,13 @@ def test_dry_run_needs_no_cluster_and_no_credentials(scheduler):
 def test_unknown_mode_is_skipped_with_a_reason(scheduler):
     """An unrecognised mode must degrade to a `skipped` verdict, never a dispatch.
 
-    This is the validator a third mode (`ersilia serve`) will have to be
-    admitted to; the test pins the current behaviour so that change is visible.
+    ``DISPATCH=serve`` did not need a third mode: it runs mode ``ersilia``
+    through the ersilia CLI, so this validator still admits exactly two.
 
     Known gap, recorded here rather than fixed (M0 vendors the bash unchanged):
-    the *reason* for a skip reaches the driver log but no further. ``state.tsv``
-    has no note column and skipped rows never enter ``status.tsv``, so the
-    dashboard shows "skipped" with no explanation.
+    the *reason* for a skip lives only in the driver's memory (``Q_NOTE``); it
+    is not logged, ``state.tsv`` has no note column and skipped rows never enter
+    ``status.tsv``, so the dashboard shows "skipped" with no explanation.
     """
     scheduler.write_queue("eos_x wobble testlib")
     scheduler.start_driver()
@@ -640,7 +634,6 @@ def test_unknown_mode_is_skipped_with_a_reason(scheduler):
     assert scheduler.dump().find("eos_x").note == ""  # see docstring
 
 
-@pytest.mark.linux_only
 def test_pause_stops_new_jobs_starting(scheduler):
     """`pause` is a sticky flag: the driver finishes nothing new while it is set."""
     scheduler.write_queue("eos_x ersilia testlib")

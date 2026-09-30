@@ -14,15 +14,19 @@
 #   install-scheduler-service.sh --print <same args>   # render the unit, install nothing
 #
 # Env forwarded into the unit when set: S3_BUCKET POLL_SECONDS ON_FAIL
-# AUTO_FETCH_SIF STATE_FILE. LOG_DIR is always written, resolved the same way the
-# driver resolves it. PATH is captured from THIS shell: run it from a login shell
-# where `squeue` works, because the unit inherits nothing else.
+# AUTO_FETCH_SIF STATE_FILE DISPATCH DATA_DIR ERSILIA_BIN. LOG_DIR is always
+# written, resolved the same way the driver resolves it. PATH is captured from
+# THIS shell: run it from a login shell where `squeue` works (or, with
+# DISPATCH=serve, where `ersilia` works), because the unit inherits nothing else.
 #
 # Rerun it to change the arguments (then restart the service). Rerun it after a
 # head-node replacement: the unit lives in /etc on the root disk, not on /shared.
 # =============================================================================
 
 set -uo pipefail
+
+# A bash >= 4 and, on macOS, Homebrew's tools, before anything else runs.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bash-floor.sh" || exit 1
 
 UNIT="${SCHEDULER_UNIT:-ersilia-scheduler}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,7 +60,12 @@ for a in "${ARGS[@]}"; do safe "argument" "$a"; done
 safe "script directory" "$SCRIPT_DIR"
 
 # Resolve LOG_DIR exactly as the driver will: environment > scheduler.conf > default.
-SCHEDULER_CONF="${SCHEDULER_CONF:-${SCRIPT_DIR}/scheduler.conf}"
+# Beside the scripts; else, for a pip-installed copy (whose folder `pip install -U`
+# replaces), ~/.config/model-launcher/scheduler.conf. An explicit SCHEDULER_CONF wins.
+if [ -z "${SCHEDULER_CONF:-}" ]; then
+    SCHEDULER_CONF="${SCRIPT_DIR}/scheduler.conf"
+    [ -f "$SCHEDULER_CONF" ] || SCHEDULER_CONF="${HOME:-}/.config/model-launcher/scheduler.conf"
+fi
 # shellcheck source=/dev/null
 [ -f "$SCHEDULER_CONF" ] && source "$SCHEDULER_CONF"
 LOG_DIR="${LOG_DIR:-/shared/logs/scheduler}"
@@ -65,10 +74,22 @@ safe "LOG_DIR" "$LOG_DIR"
 # A unit gets almost no PATH and never reads /etc/profile.d. Without /opt/slurm/bin
 # scancel and squeue fail silently — and a failed squeue reads as "keep waiting",
 # so a wave would hang forever. Capture the PATH that works here, and prove it.
-for bin in sbatch squeue scancel; do
-    command -v "$bin" >/dev/null 2>&1 \
-        || die "'$bin' is not on PATH. Run this from a shell where SLURM commands work."
-done
+# A serve machine has no SLURM: what it needs is the ersilia CLI.
+# Not defaulted in place: DISPATCH is forwarded into the unit only when set.
+SERVE=0
+[ "${DISPATCH:-slurm}" = "serve" ] && SERVE=1
+if [ "$SERVE" -eq 1 ]; then
+    ERSILIA_BIN="${ERSILIA_BIN:-ersilia}"
+    command -v "$ERSILIA_BIN" >/dev/null 2>&1 \
+        || die "ersilia CLI '$ERSILIA_BIN' not found. Set ERSILIA_BIN, e.g. to a conda env's bin/ersilia."
+    id -nG | tr ' ' '\n' | grep -qx docker \
+        || echo "WARNING: $(id -un) is not in the docker group; ersilia may not be able to serve models." >&2
+else
+    for bin in sbatch squeue scancel; do
+        command -v "$bin" >/dev/null 2>&1 \
+            || die "'$bin' is not on PATH. Run this from a shell where SLURM commands work."
+    done
+fi
 safe "PATH" "$PATH"
 
 RUN_USER="$(id -un)"
@@ -77,8 +98,14 @@ RUN_GROUP="$(id -gn)"
 env_lines() {
     echo "Environment=\"PATH=${PATH}\""
     echo "Environment=\"LOG_DIR=${LOG_DIR}\""
+    # ersilia keeps its models and sessions under $HOME/eos, and a system unit
+    # cannot be relied on to set HOME.
+    if [ "$SERVE" -eq 1 ]; then
+        safe "HOME" "$HOME"
+        echo "Environment=\"HOME=${HOME}\""
+    fi
     local var
-    for var in S3_BUCKET POLL_SECONDS ON_FAIL AUTO_FETCH_SIF STATE_FILE; do
+    for var in S3_BUCKET POLL_SECONDS ON_FAIL AUTO_FETCH_SIF STATE_FILE DISPATCH DATA_DIR ERSILIA_BIN; do
         if [ -n "${!var:-}" ]; then
             safe "$var" "${!var}"
             echo "Environment=\"${var}=${!var}\""
@@ -92,7 +119,7 @@ render() {
 [Unit]
 Description=Ersilia model scheduler driver (${LOG_DIR})
 Wants=network-online.target
-After=network-online.target remote-fs.target slurmctld.service
+After=network-online.target remote-fs.target slurmctld.service$([ "$SERVE" -eq 1 ] && echo " docker.service")
 RequiresMountsFor=${SCRIPT_DIR} ${LOG_DIR}
 
 [Service]
@@ -145,14 +172,11 @@ systemctl is-active --quiet "$UNIT" 2>/dev/null && ACTIVE=1
 if [ "$ACTIVE" -eq 0 ]; then
     # shellcheck source=/dev/null
     source "${SCRIPT_DIR}/scheduler-lib.sh" || die "cannot source scheduler-lib.sh"
-    for pid in $(pgrep -u "$(id -u)" -f 'run-model-queue\.sh' 2>/dev/null); do
-        is_driver_process "$pid" || continue
-        env_dir="$(tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null | sed -n 's/^LOG_DIR=//p' | head -n 1)"
-        if [ -z "$env_dir" ] || [ "$env_dir" = "$LOG_DIR" ]; then
-            die "a driver is already running for ${LOG_DIR} (pid ${pid}, probably in tmux).
+    pid="$(driver_pid_scan)"
+    if [ -n "$pid" ]; then
+        die "a driver is already running for ${LOG_DIR} (pid ${pid}, probably in tmux).
        Stop it first:  ${SCRIPT_DIR}/sched-ctl.sh --log-dir ${LOG_DIR} shutdown"
-        fi
-    done
+    fi
 fi
 
 TARGET="/etc/systemd/system/${UNIT}.service"

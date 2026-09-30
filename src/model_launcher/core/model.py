@@ -152,6 +152,16 @@ class Snapshot:
         return self.runtime.get("sif_dir", "")
 
     @property
+    def data_dir(self) -> str:
+        """Local folder holding ``input/`` and ``output/`` on a ``serve`` target; empty on SLURM."""
+        return self.runtime.get("data_dir", "")
+
+    @property
+    def store(self) -> str:
+        """Where progress is counted, for display: ``S3`` on SLURM, ``disk`` on serve."""
+        return "disk" if self.dispatch == "serve" else "S3"
+
+    @property
     def driver_state(self) -> str:
         """One word for the header: what is this scheduler doing right now."""
         if not self.driver_alive:

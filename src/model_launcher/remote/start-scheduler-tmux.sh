@@ -10,9 +10,13 @@
 #
 # Usage: start-scheduler-tmux.sh <queue_file> [default_library] [default_wave_size] [default_queue] [--dry-run]
 # Env forwarded: S3_BUCKET POLL_SECONDS ON_FAIL AUTO_FETCH_SIF LOG_DIR STATE_FILE
+#                DISPATCH DATA_DIR ERSILIA_BIN
 # =============================================================================
 
 set -uo pipefail
+
+# A bash >= 4 and, on macOS, Homebrew's tools, before anything else runs.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bash-floor.sh" || exit 1
 
 SESSION="${SCHEDULER_TMUX:-scheduler}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,6 +62,9 @@ ENVS=$(printf 'S3_BUCKET=%q POLL_SECONDS=%q ON_FAIL=%q AUTO_FETCH_SIF=%q LOG_DIR
     "${S3_BUCKET:-ai2050-ersilia-cluster}" "${POLL_SECONDS:-30}" \
     "${ON_FAIL:-continue}" "${AUTO_FETCH_SIF:-0}" "$LOG_DIR")
 [ -n "${STATE_FILE:-}" ] && ENVS="$ENVS STATE_FILE=$(printf '%q' "$STATE_FILE")"
+for var in DISPATCH DATA_DIR ERSILIA_BIN; do
+    [ -n "${!var:-}" ] && ENVS="$ENVS ${var}=$(printf '%q' "${!var}")"
+done
 
 CMD=$(printf '%q ' "$DRIVER" "${ARGS[@]}")
 FULL="${ENVS} ${CMD}2>&1 | tee -a ${LOG_DIR}/driver.log"

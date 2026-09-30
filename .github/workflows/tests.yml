@@ -1,0 +1,33 @@
+name: tests
+
+# The scheduler runs on Linux (the AWS cluster, workstations) and macOS (serve
+# hosts). The bash differs in small ways between the two userlands, and a green
+# run on one says nothing about the other, so every push runs both.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # A Mac host needs Homebrew's bash (>= 4) and flock; see docs/deploying.md.
+      - name: macOS host tools
+        if: runner.os == 'macOS'
+        run: brew install bash flock
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: |
+          ruff check
+          ruff format --check
+      - name: Test
+        run: pytest -q

@@ -22,7 +22,6 @@ from model_launcher.core.remote import ctl_path
 from model_launcher.core.runner import LocalRunner
 
 
-@pytest.mark.linux_only
 def test_probe_finds_each_running_driver_by_its_log_dir(running_scheduler, tmp_path):
     """Two instances on one machine are two results, each with its own LOG_DIR."""
     scheduler = running_scheduler

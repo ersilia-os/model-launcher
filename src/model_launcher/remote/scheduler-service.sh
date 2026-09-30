@@ -29,11 +29,19 @@
 
 set -uo pipefail
 
+# A bash >= 4 and, on macOS, Homebrew's tools, before anything else runs.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bash-floor.sh" || exit 1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Same defaults, in the same order, as the driver itself — so this script and the
 # driver it becomes can never disagree about which LOG_DIR they mean.
-SCHEDULER_CONF="${SCHEDULER_CONF:-${SCRIPT_DIR}/scheduler.conf}"
+# Beside the scripts; else, for a pip-installed copy (whose folder `pip install -U`
+# replaces), ~/.config/model-launcher/scheduler.conf. An explicit SCHEDULER_CONF wins.
+if [ -z "${SCHEDULER_CONF:-}" ]; then
+    SCHEDULER_CONF="${SCRIPT_DIR}/scheduler.conf"
+    [ -f "$SCHEDULER_CONF" ] || SCHEDULER_CONF="${HOME:-}/.config/model-launcher/scheduler.conf"
+fi
 # shellcheck source=/dev/null
 [ -f "$SCHEDULER_CONF" ] && source "$SCHEDULER_CONF"
 LOG_DIR="${LOG_DIR:-/shared/logs/scheduler}"

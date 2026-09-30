@@ -29,6 +29,7 @@ remote/
 ├── sched-ctl.sh                  control CLI; every command goes through it
 ├── run-model-queue.sh            the driver; runs the queue one model at a time
 ├── scheduler-lib.sh              shared helpers
+├── bash-floor.sh                 sourced first: bash ≥ 4 and Homebrew tools on macOS
 ├── scheduler-status.sh           plain-text queue view
 ├── install-scheduler-service.sh  installs the driver as a systemd service
 ├── scheduler-service.sh          the service's start / post-stop entry point
@@ -36,6 +37,8 @@ remote/
 ├── library-aliases.sh            short library names -> full names
 ├── scheduler.conf.example        per-machine settings
 ├── example.queue                 template queue file
+├── serve/                        DISPATCH=serve: runs a model with the ersilia CLI
+│   └── run-ersilia-serve.sh
 └── slurm/                        wave orchestrators and #SBATCH workers
     ├── submit-ersilia-waves.sh
     ├── submit-singularity-waves.sh
@@ -98,8 +101,9 @@ ssh $H "cd $DEST && ./install-scheduler-service.sh --print models.queue DEFAULT_
 ssh -t $H "cd $DEST && ./install-scheduler-service.sh models.queue DEFAULT_LIBRARY"        # install + start
 ```
 
-`DEFAULT_LIBRARY` must match a folder under `s3://YOUR_BUCKET/input/`
-exactly. Run the installer from a shell where `squeue` works: it copies that
+`DEFAULT_LIBRARY` must match a folder under `s3://YOUR_BUCKET/input/` (or
+`$DATA_DIR/input/` on a `serve` machine) exactly. Run the installer from a
+shell where `squeue` works: it copies that
 `PATH` into the service.
 
 | On the server | |
@@ -124,6 +128,54 @@ model-launcher --host $H check
 ```
 
 It should show `driver RUNNING` and your queue.
+
+## A machine without SLURM (`DISPATCH=serve`)
+
+A workstation that runs models with `ersilia serve` needs no copy step and no
+AWS credentials. `pip install` the package on it: the scripts ship inside, and
+`check` and the dashboard find them there.
+
+Progress is counted from a local folder instead of S3. It has the bucket's
+layout:
+
+```
+$DATA_DIR/input/<library>/<library>_chunk_<N>.csv
+$DATA_DIR/output/<library>/<model>/
+```
+
+Put `scheduler.conf` at `~/.config/model-launcher/scheduler.conf`, **outside**
+the installed package, because `pip install -U` replaces that folder. Every
+script looks there when there is no conf beside it, so the driver and the
+`sched-ctl.sh` the client runs over SSH agree:
+
+```bash
+# ~/.config/model-launcher/scheduler.conf
+DISPATCH="${DISPATCH:-serve}"
+DATA_DIR="${DATA_DIR:-/data/model-launcher}"
+ERSILIA_BIN="${ERSILIA_BIN:-/home/YOU/miniconda3/envs/ersilia/bin/ersilia}"
+```
+
+Each job runs `ersilia fetch`, `ersilia serve`, one `ersilia run` per chunk,
+and `ersilia close`. Results are written to
+`output/<library>/<model>/<model>_results_<N>.csv`. Only mode `ersilia` exists
+here; `singularity` lines are skipped.
+
+What the machine needs:
+
+- An ersilia recent enough that every error exits 1 (current `master`). An
+  older one can report a failed run as success.
+- The user running the driver in the `docker` group, for models served from
+  DockerHub.
+- `ERSILIA_BIN` set if `ersilia` is only on PATH inside a conda env. The
+  driver refuses to start if it can't find it.
+
+Install the service as in step 3. On `serve`, the installer needs no SLURM
+commands, and it writes `HOME` into the unit, because ersilia keeps its models
+under `~/eos`.
+
+A cancel closes the model: the Docker container is stopped, not left running.
+A missing or relative `DATA_DIR` is refused, so it can't silently mark every
+job `missing-files`.
 
 ## Redeploying
 

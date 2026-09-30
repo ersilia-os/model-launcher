@@ -68,7 +68,6 @@ def test_percent_never_reads_finished_or_unstarted_while_partway():
     assert draw.columns(120).percent == 114  # the spec's grid, exactly
 
 
-@pytest.mark.linux_only
 def test_dashboard_selects_the_running_job_and_filters(environment):
     scheduler = environment
     scheduler.write_queue("eos_run ersilia testlib\neos_wait ersilia testlib\n")
@@ -304,7 +303,6 @@ def test_switching_host_forgets_the_old_hosts_counts(environment):
     asyncio.run(scenario())
 
 
-@pytest.mark.linux_only
 def test_probe_reports_a_running_driver(running_scheduler, monkeypatch):
     status = probe_host(None)
     mine = [d for d in status.drivers if d.log_dir == str(running_scheduler.log_dir)]
