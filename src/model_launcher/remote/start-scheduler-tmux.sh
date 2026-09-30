@@ -49,6 +49,15 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
     exit 1
 fi
 
+# The same scheduler.conf the driver reads — before the defaults below, which
+# are inlined into the driver's command and would otherwise hide the conf's.
+if [ -z "${SCHEDULER_CONF:-}" ]; then
+    SCHEDULER_CONF="${SCRIPT_DIR}/scheduler.conf"
+    [ -f "$SCHEDULER_CONF" ] || SCHEDULER_CONF="${HOME:-}/.config/model-launcher/scheduler.conf"
+fi
+# shellcheck source=/dev/null
+[ -f "$SCHEDULER_CONF" ] && source "$SCHEDULER_CONF"
+
 LOG_DIR="${LOG_DIR:-/shared/logs/scheduler}"
 mkdir -p "$LOG_DIR"
 
