@@ -204,9 +204,10 @@ def test_stop_post_does_nothing_after_a_clean_stop(scheduler):
 
 
 def _render(scheduler, *args: str, **env: str) -> subprocess.CompletedProcess:
+    """Render the systemd unit, on any OS (macOS would otherwise get a plist)."""
     return subprocess.run(
         ["bash", str(INSTALL), "--print", str(scheduler.queue_file), *args],
-        env=scheduler.env(**env),
+        env=scheduler.env(**{"SCHED_SERVICE_OS": "Linux", **env}),
         capture_output=True,
         check=False,
         text=True,

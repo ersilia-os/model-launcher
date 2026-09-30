@@ -1,8 +1,9 @@
 #!/bin/bash
 # =============================================================================
-# systemd entry point for the scheduler driver (see install-scheduler-service.sh).
+# Service entry point for the scheduler driver (see install-scheduler-service.sh):
+# systemd on Linux, launchd on macOS.
 # =============================================================================
-# Two verbs, one per unit hook:
+# systemd uses two verbs, one per unit hook; launchd uses the third:
 #
 #   start <queue_file> [default_library] [default_wave_size] [default_queue]
 #       ExecStart. Becomes the driver via `exec`, so the driver IS the unit's
@@ -23,6 +24,19 @@
 #       invariant 4 (orchestrator dead BEFORE scancel) holds by construction.
 #       The row is left `running` on purpose: the next driver's
 #       reclaim_stale_running resumes it (invariant 14).
+#
+#   launchd <queue_file> [default_library] [default_wave_size] [default_queue]
+#       The LaunchAgent's program (macOS). launchd has no SuccessExitStatus=,
+#       no RestartPreventExitStatus= and no ExecStopPost=, so instead of
+#       becoming the driver this stays its parent and supplies all three:
+#         * TERM/INT (launchctl bootout) is passed on to the driver, whose
+#           trap stops the job as usual; its 130/143 then exits 0, so
+#           KeepAlive (SuccessfulExit=false) does not restart a deliberate stop.
+#         * 75 (another driver holds the lock) exits 0 too: logged, not looped.
+#         * Any other exit is a crash. The job's orchestrator is still running
+#           — on macOS it shares the driver's process group — so it is stopped
+#           here (its trap closes the ersilia model), then the exit code goes
+#           back to launchd, which restarts the driver to resume the job.
 #
 # Env: the same as run-model-queue.sh; the unit sets PATH, LOG_DIR and the rest.
 # =============================================================================
@@ -61,6 +75,51 @@ case "$verb" in
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] starting under systemd (pid $$)"
         exec bash "${SCRIPT_DIR}/run-model-queue.sh" "$@"
         ;;
+    launchd)
+        [ "$#" -ge 1 ] || { echo "Usage: $0 launchd <queue_file> [lib] [wave] [queue]" >&2; exit 2; }
+        mkdir -p "$LOG_DIR" || exit 1
+        exec >>"${LOG_DIR}/driver.log" 2>&1
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] starting under launchd (wrapper pid $$)"
+        bash "${SCRIPT_DIR}/run-model-queue.sh" "$@" &
+        driver=$!
+        trap 'kill -TERM "$driver" 2>/dev/null' TERM INT
+        rc=0
+        wait "$driver" || rc=$?
+        # A trapped signal ends `wait` early; wait for the driver's real exit.
+        while kill -0 "$driver" 2>/dev/null; do
+            rc=0
+            wait "$driver" || rc=$?
+        done
+        case "$rc" in
+            0|130|143)
+                exit 0 ;;
+            75)
+                echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] another driver holds the lock for ${LOG_DIR}; not restarting"
+                exit 0 ;;
+        esac
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] driver exited rc=${rc} without cleaning up"
+        # Only as launchd runs it: the leader of our own process group. Anywhere
+        # else the group is someone else's, and must not be touched.
+        # What the dead driver left is now an orphan: still in our group, with
+        # pid 1 (launchd) as its parent. Its own children follow its trap.
+        if [ "$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')" = "$$" ]; then
+            left="$(ps -A -o pid=,ppid=,pgid= 2>/dev/null \
+                    | awk -v g="$$" '$3 == g && $2 == 1 { printf "%s ", $1 }')"
+            if [ -n "$left" ]; then
+                echo "  stopping what it left running: ${left}"
+                # shellcheck disable=SC2086
+                kill -TERM $left 2>/dev/null
+                waited=0
+                while [ "$waited" -lt "${SERVE_STOP_SECONDS:-60}" ]; do
+                    alive=0
+                    for pid in $left; do kill -0 "$pid" 2>/dev/null && alive=1; done
+                    [ "$alive" -eq 1 ] || break
+                    sleep 1; waited=$((waited + 1))
+                done
+            fi
+        fi
+        exit "$rc"
+        ;;
     stop-post)
         # shellcheck source=/dev/null
         source "${SCRIPT_DIR}/scheduler-lib.sh" || exit 1
@@ -78,7 +137,7 @@ case "$verb" in
         exit 0
         ;;
     *)
-        echo "Usage: $0 start <queue_file> [lib] [wave] [queue] | stop-post" >&2
+        echo "Usage: $0 start|launchd <queue_file> [lib] [wave] [queue] | stop-post" >&2
         exit 2
         ;;
 esac

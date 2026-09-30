@@ -194,7 +194,11 @@ def test_the_serve_unit_needs_no_slurm_and_carries_home(scheduler, data_dir, tmp
     (bin_dir / "ersilia").symlink_to(scheduler.stub_bin / "ersilia")
     proc = subprocess.run(
         ["bash", str(INSTALL), "--print", str(scheduler.queue_file), "lib1"],
-        env=scheduler.env(**_serve_env(data_dir), PATH=f"{bin_dir}:/usr/bin:/bin"),
+        env=scheduler.env(
+            **_serve_env(data_dir),
+            PATH=f"{bin_dir}:/usr/bin:/bin",
+            SCHED_SERVICE_OS="Linux",
+        ),
         capture_output=True,
         check=False,
         text=True,
