@@ -316,10 +316,14 @@ class Scheduler:
 
 
 @pytest.fixture
-def scheduler(tmp_path: Path) -> Scheduler:
+def scheduler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scheduler:
     """A scheduler instance in a temporary directory, with recording stubs."""
     if shutil.which("bash") is None:  # pragma: no cover - environment guard
         pytest.skip("bash is required to exercise the scheduler")
+    # Discovery run from the test process itself (probe_host, discover_drivers
+    # through a LocalRunner) must read the registry this instance's drivers
+    # write. Linux would still find them through /proc; macOS only has this.
+    monkeypatch.setenv("SCHED_REGISTRY_DIR", str(tmp_path / "drivers"))
 
     log_dir = tmp_path / "logs"
     log_dir.mkdir()

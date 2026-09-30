@@ -63,7 +63,8 @@ for f in "$reg"/*; do
     emit "$pid" "$log_dir" "$script_dir"
 done
 
-[ -d /proc/self ] || exit 0
+# SCHED_DISCOVER_NO_PROC=1 (tests) looks only at the registry, as macOS does.
+[ -d /proc/self ] && [ -z "${SCHED_DISCOVER_NO_PROC:-}" ] || exit 0
 for pid in $(pgrep -u "$(id -u)" -f 'run-model-queue\.sh' 2>/dev/null); do
     log_dir="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^LOG_DIR=//p' | head -n 1)"
     [ -n "$log_dir" ] || continue
