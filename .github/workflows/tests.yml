@@ -15,8 +15,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       # A Mac host needs Homebrew's bash (>= 4) and flock; see docs/deploying.md.
@@ -30,4 +30,22 @@ jobs:
           ruff check
           ruff format --check
       - name: Test
-        run: pytest -q
+        run: pytest -q -rf --junitxml=pytest-report.xml
+      # One annotation per failing test, so failures can be read on the run's
+      # summary page (and through the public API) without opening the log.
+      - name: Annotate failures
+        if: failure()
+        shell: python
+        run: |
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          report = Path("pytest-report.xml")
+          if report.exists():
+              for case in ET.parse(report).iter("testcase"):
+                  for bad in list(case.iter("failure")) + list(case.iter("error")):
+                      name = f"{case.get('classname')}::{case.get('name')}"
+                      text = (bad.get("message") or "") + "\n" + (bad.text or "")
+                      text = "\n".join(text.strip().splitlines()[-25:])
+                      text = text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+                      print(f"::error title={name}::{text}")
