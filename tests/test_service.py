@@ -17,7 +17,6 @@ import shutil
 import signal
 import subprocess
 import time
-from pathlib import Path
 
 import pytest
 
@@ -48,18 +47,13 @@ def _info_pid(scheduler) -> str:
     return ""
 
 
-def _kill_orphans(log_dir: Path) -> None:
+def _kill_orphans(scheduler) -> None:
     """SIGKILL the fake orchestrators a killed driver left behind (ours only)."""
-    proc = subprocess.run(
-        ["pgrep", "-f", "sleep 600"], capture_output=True, check=False, text=True
-    )
-    for pid in proc.stdout.split():
+    for pid in scheduler.sleep_children():
         try:
-            env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
-        except OSError:
-            continue
-        if f"LOG_DIR={log_dir}".encode() in env:
-            os.kill(int(pid), signal.SIGKILL)
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 # --- the lock ---------------------------------------------------------------
@@ -72,7 +66,6 @@ def test_a_second_driver_on_the_same_log_dir_exits_75(running_scheduler):
     assert "another driver holds the lock" in running_scheduler.driver_log()
 
 
-@pytest.mark.linux_only
 def test_a_sigkilled_driver_does_not_block_the_next_one(scheduler):
     """The old mkdir lock outlived SIGKILL; every restart then failed forever."""
     scheduler.write_queue("eos_x ersilia testlib")
@@ -89,7 +82,7 @@ def test_a_sigkilled_driver_does_not_block_the_next_one(scheduler):
         assert second.poll() is None
         assert "reclaimed interrupted job: eos_x" in scheduler.driver_log()
     finally:
-        _kill_orphans(scheduler.log_dir)
+        _kill_orphans(scheduler)
 
 
 def test_a_stale_legacy_lock_directory_is_cleared(scheduler):
@@ -122,7 +115,6 @@ def test_a_process_that_only_mentions_the_driver_is_not_a_driver(scheduler):
         lookalike.wait(timeout=10)
 
 
-@pytest.mark.linux_only
 def test_a_live_legacy_lock_holder_is_respected(running_scheduler):
     """A pre-flock driver never sees our flock, so its directory must still count."""
     (running_scheduler.log_dir / ".lock").mkdir()
@@ -134,13 +126,12 @@ def test_a_live_legacy_lock_holder_is_respected(running_scheduler):
 # --- scheduler-service.sh ---------------------------------------------------
 
 
-@pytest.mark.linux_only
 def test_service_start_becomes_the_driver_and_is_discoverable(scheduler, tmp_path):
     """LOG_DIR comes only from scheduler.conf here, as it would under systemd.
 
-    Discovery reads /proc/<pid>/environ, which only holds what the process was
-    exec'd with — so this passes only if the entry script exports LOG_DIR
-    before exec, not if the driver exports it afterwards.
+    On Linux, discovery also reads /proc/<pid>/environ, which only holds what
+    the process was exec'd with — so this passes only if the entry script
+    exports LOG_DIR before exec, not if the driver exports it afterwards.
     """
     conf = tmp_path / "scheduler.conf"
     conf.write_text(f'LOG_DIR="${{LOG_DIR:-{scheduler.log_dir}}}"\n')
@@ -179,7 +170,6 @@ def _stop_post(scheduler) -> subprocess.CompletedProcess:
     )
 
 
-@pytest.mark.linux_only
 def test_stop_post_cancels_what_a_crashed_driver_left_on_slurm(scheduler):
     job_log = scheduler.log_dir / "eos_x_testlib.log"
     job_log.write_text("Submitted array job 4242\nSubmitted batch job 4243\n")
@@ -214,9 +204,10 @@ def test_stop_post_does_nothing_after_a_clean_stop(scheduler):
 
 
 def _render(scheduler, *args: str, **env: str) -> subprocess.CompletedProcess:
+    """Render the systemd unit, on any OS (macOS would otherwise get a plist)."""
     return subprocess.run(
         ["bash", str(INSTALL), "--print", str(scheduler.queue_file), *args],
-        env=scheduler.env(**env),
+        env=scheduler.env(**{"SCHED_SERVICE_OS": "Linux", **env}),
         capture_output=True,
         check=False,
         text=True,

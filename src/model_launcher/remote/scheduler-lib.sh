@@ -3,11 +3,11 @@
 # Shared helpers for the wave scheduler.
 # =============================================================================
 # SOURCED (not executed) by run-model-queue.sh (driver), sched-ctl.sh (control
-# CLI) and scheduler-status.sh (renderer). Keeping the per-mode S3-counting logic
+# CLI) and scheduler-status.sh (renderer). Keeping the per-mode counting logic
 # and the on-disk formats here means the three can never drift on how "done" is
 # measured or how the queue/status files are laid out.
 #
-# The caller must have S3_BUCKET set before calling the s3_* helpers.
+# The counting helpers read DISPATCH, and S3_BUCKET or DATA_DIR (see below).
 # write_state() additionally operates on the driver's Q_* arrays + STATE_FILE.
 #
 # On-disk layout under $LOG_DIR:
@@ -24,28 +24,110 @@
 # ISO-8601 UTC timestamp, e.g. 2026-07-23T09:01:22Z
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# --- portability: Linux and macOS -------------------------------------------
+# GNU and BSD userlands differ in a few commands the scheduler needs; these are
+# the only places that know. Everything else sticks to options both accept.
+
+# Modification time in epoch seconds; 0 if the file is missing.
+file_mtime() {  # $1 = file
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0
+}
+
+# What the driver starts an orchestrator under. Linux: `setsid`, its own session
+# (unchanged from before). macOS has no setsid; there the orchestrator stays in
+# the driver's process group, which is also what lets launchd — which kills a
+# dead job's whole process group — stop it after a driver crash. Cancel never
+# depends on either: kill_tree walks the process tree.
+if command -v setsid >/dev/null 2>&1; then SCHED_DETACH="setsid"; else SCHED_DETACH=""; fi
+
 # SLURM job ids the orchestrator recorded submitting, one per line, from ONE job's
 # log. The only source either cancel path may use (the driver's cancel_child, and
 # scheduler-service.sh's post-crash reap): ids come from THIS job's own log, so
 # neither can ever scancel something the scheduler did not start.
 log_submitted_ids() {  # $1 = logfile
     [ -f "$1" ] || return 0
-    grep -oP 'Submitted (array|batch) job \K[0-9]+' "$1" 2>/dev/null | sort -u
+    sed -nE 's/.*Submitted (array|batch) job ([0-9]+).*/\2/p' "$1" 2>/dev/null | sort -u
 }
 
 # All the statuses the scheduler can assign, in display order. Single source of
 # truth for the summary lines in the driver, the renderer and the TUI.
 SCHED_STATUSES="done running pending held failed cancelled missing-files skipped"
 
+# --- where input and results live -------------------------------------------
+# Counting is LISTING (which store, chosen by DISPATCH) followed by MATCHING (one
+# pattern per kind, shared by every store), so the patterns cannot drift apart
+# between stores. Both stores have the same layout:
+#   slurm -> s3://$S3_BUCKET/input/<lib>/   s3://$S3_BUCKET/output/<lib>/<model>/
+#   serve -> $DATA_DIR/input/<lib>/          $DATA_DIR/output/<lib>/<model>/
+# The caller must have S3_BUCKET (slurm) or DATA_DIR (serve) set.
+CHUNK_PATTERN='_chunk_[0-9]+\.csv$'
+
+store_is_local() { [ "${DISPATCH:-slurm}" = "serve" ]; }
+
+# The folder or prefix holding one library's input, or one model's results on it.
+store_path() {  # $1 = input|output  $2 = library  [$3 = model]
+    local rel="input/$2/"
+    [ "$1" = "output" ] && rel="output/$2/$3/"
+    if store_is_local; then echo "${DATA_DIR%/}/${rel}"; else echo "s3://${S3_BUCKET}/${rel}"; fi
+}
+
+# Refuse a store setting that would otherwise fail later, and silently: an unset
+# DATA_DIR lists "/input/<lib>/", finds nothing, and marks every job missing-files.
+check_store_config() {
+    case "${DISPATCH:-slurm}" in
+        slurm) return 0 ;;
+        serve)
+            case "${DATA_DIR:-}" in
+                /*) return 0 ;;
+                '') echo "ERROR: DISPATCH=serve needs DATA_DIR (the folder holding input/ and output/)" >&2 ;;
+                *)  echo "ERROR: DATA_DIR must be an absolute path (got '${DATA_DIR}')" >&2 ;;
+            esac ;;
+        *) echo "ERROR: DISPATCH must be slurm or serve (got '${DISPATCH}')" >&2 ;;
+    esac
+    return 1
+}
+
+# Print the file names under store_path, one per line.
+# rc 0 = listed (maybe nothing); 1 = no such folder/prefix; 2 = could not list,
+# with the reason on stderr. S3 has no folders: an empty prefix and a missing one
+# are the same thing, and `aws s3 ls` exits 1 for both with nothing on stderr, so
+# a non-empty stderr is what separates "cannot list" (credentials, network, bad
+# bucket) from "nothing there".
+_list_names() {  # $1 = input|output  $2 = library  [$3 = model]
+    local where out rc=0 errf
+    where="$(store_path "$@")"
+    if store_is_local; then
+        [ -d "$where" ] || return 1
+        { [ -r "$where" ] && [ -x "$where" ]; } || { echo "permission denied" >&2; return 2; }
+        find "$where" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | sed 's#.*/##'
+        return 0
+    fi
+    errf="$(mktemp "${TMPDIR:-/tmp}/sched-ls.XXXXXX" 2>/dev/null)" || errf=/dev/null
+    out="$(aws s3 ls "$where" 2>"$errf")" || rc=$?
+    [ -n "$out" ] && printf '%s\n' "$out" | awk '{ print $NF }'
+    if [ "$rc" -ne 0 ]; then
+        if [ -s "$errf" ]; then
+            head -n 1 "$errf" >&2; rc=2
+        else
+            rc=1
+        fi
+    fi
+    [ "$errf" = /dev/null ] || rm -f "$errf"
+    return "$rc"
+}
+
 # --- fake-S3 test mode -------------------------------------------------------
-# SCHED_FAKE_S3=1 makes the s3_count_* helpers read from a local fixture instead
+# SCHED_FAKE_S3=1 makes the counting helpers read from a local fixture instead
 # of calling `aws s3 ls`, so the whole scheduler can be exercised with no AWS
 # credentials and no cluster. Fixture: $SCHED_FAKE_S3_FILE, one line per entry
 #   input  <library>                 <count>
 #   output <model> <library> <mode>  <count>
-# A missing fixture or missing line counts as 0.
+# A missing fixture or missing line counts as 0. It fakes S3 only: with
+# DISPATCH=serve the store is a real folder, which a test can simply create.
 SCHED_FAKE_S3="${SCHED_FAKE_S3:-0}"
 SCHED_FAKE_S3_FILE="${SCHED_FAKE_S3_FILE:-${LOG_DIR:-/tmp}/fake-s3.txt}"
+
+_use_fake_s3() { [ "$SCHED_FAKE_S3" = "1" ] && ! store_is_local; }
 
 _fake_s3_count() {  # $1 = kind (input|output), $2.. = key fields
     local kind="$1"; shift
@@ -60,21 +142,27 @@ _fake_s3_count() {  # $1 = kind (input|output), $2.. = key fields
     echo 0
 }
 
-# Count a library's input chunks in S3:  <lib>_chunk_<NNN>.csv
+# Count a library's input chunks:  <lib>_chunk_<NNN>.csv
 # Digit-count agnostic (3-digit small libs and 6-digit 1.4B both match).
 #
-# CACHED, because this is the single most expensive call in the whole scheduler and
-# the answer is effectively static: a library's chunk count only changes when the
-# library is re-ingested. Listing 13,639 objects is ~14 paged API calls plus AWS CLI
-# startup, and a full recount would otherwise pay that for every row sharing the
-# library. Set SCHED_INPUT_CACHE_TTL=0 to force a fresh count.
-s3_count_input() {  # $1 = library
-    if [ "$SCHED_FAKE_S3" = "1" ]; then _fake_s3_count input "$1"; return 0; fi
+# CACHED on S3, because this is the single most expensive call in the whole
+# scheduler and the answer is effectively static: a library's chunk count only
+# changes when the library is re-ingested. Listing 13,639 objects is ~14 paged API
+# calls plus AWS CLI startup, and a full recount would otherwise pay that for
+# every row sharing the library. Set SCHED_INPUT_CACHE_TTL=0 to force a fresh
+# count. A local folder is cheap to list and is never cached.
+count_input() {  # $1 = library
+    if _use_fake_s3; then _fake_s3_count input "$1"; return 0; fi
 
     local lib="$1" ttl="${SCHED_INPUT_CACHE_TTL:-3600}"
     local cache="${LOG_DIR:-/tmp}/.input-counts" now val ts key
-    now="$(date -u +%s)"
 
+    if store_is_local; then
+        _list_names input "$lib" 2>/dev/null | grep -cE "$CHUNK_PATTERN" || true
+        return 0
+    fi
+
+    now="$(date -u +%s)"
     if [ "$ttl" -gt 0 ] && [ -f "$cache" ]; then
         while IFS=$'\t' read -r ts val key; do
             [ "$key" = "$lib" ] || continue
@@ -85,8 +173,7 @@ s3_count_input() {  # $1 = library
         done < "$cache"
     fi
 
-    val="$(aws s3 ls "s3://${S3_BUCKET}/input/${lib}/" 2>/dev/null \
-           | grep -cP '_chunk_[0-9]+\.csv$' || true)"
+    val="$(_list_names input "$lib" 2>/dev/null | grep -cE "$CHUNK_PATTERN" || true)"
     val="${val:-0}"
 
     # Only cache a real answer: caching a 0 from a transient AWS failure would make
@@ -100,24 +187,44 @@ s3_count_input() {  # $1 = library
     echo "$val"
 }
 
-# Count a model's result files in S3, per run mode.
+# Why a library has no usable input, as one line for a missing-files note; prints
+# nothing if it has chunks. Separates the causes a bare count of 0 hides: a
+# mistyped local folder, an unreachable S3 (no credentials, no network), and a
+# library that really is empty.
+input_problem() {  # $1 = library
+    local lib="$1" where reason rc=0
+    [ "$(count_input "$lib")" -gt 0 ] && return 0
+    where="$(store_path input "$lib")"
+    if _use_fake_s3; then echo "no input chunks in ${where}"; return 0; fi
+    reason="$(_list_names input "$lib" 2>&1 >/dev/null)" || rc=$?
+    if [ "$rc" -eq 2 ]; then
+        echo "cannot list ${where}: ${reason:-unknown error}"
+    elif [ "$rc" -eq 1 ] && store_is_local; then
+        echo "input dir does not exist: ${where}"
+    else
+        echo "no input chunks in ${where}"
+    fi
+}
+
+# Count a model's result files, per run mode.
 #   ersilia     -> <model>_results_<NNN>.csv
 #   singularity -> <model>_<NNN>.csv         (NO _results_)
 # The two patterns never cross-count: after "<model>_", ersilia has the letters
 # "results", not a digit, so the singularity regex can't match an ersilia file.
-s3_count_output() {  # $1 = model  $2 = library  $3 = mode
-    if [ "$SCHED_FAKE_S3" = "1" ]; then _fake_s3_count output "$1" "$2" "$3"; return 0; fi
+# A missing output folder is normal before a job starts, and reads as 0.
+count_output() {  # $1 = model  $2 = library  $3 = mode
+    if _use_fake_s3; then _fake_s3_count output "$1" "$2" "$3"; return 0; fi
     local pat
     case "$3" in
         ersilia)     pat="${1}_results_[0-9]+\.csv$" ;;
         singularity) pat="${1}_[0-9]+\.csv$" ;;
         *)           echo 0; return 0 ;;
     esac
-    aws s3 ls "s3://${S3_BUCKET}/output/${2}/${1}/" 2>/dev/null \
-        | grep -cP "$pat" || true
+    _list_names output "$2" "$1" 2>/dev/null | grep -cE "$pat" || true
 }
 
-# List the libraries that actually exist in S3, i.e. the prefixes under input/.
+# List the libraries that actually exist: the prefixes under input/ in S3, or the
+# folders under $DATA_DIR/input locally.
 #
 # This is the authoritative answer to "what can I run against?" — the alias table
 # only knows the five hand-registered names, so anything ingested since (the h3d
@@ -125,19 +232,25 @@ s3_count_output() {  # $1 = model  $2 = library  $3 = mode
 #
 # Cheap: `aws s3 ls` on a prefix with a trailing slash returns COMMON PREFIXES
 # (`PRE name/`), a dozen or so lines, not the millions of objects beneath them.
-# Cached anyway (default 1 h, SCHED_LIB_CACHE_TTL=0 to force) because the plain
-# dump the TUI polls every 2 s must never call AWS.
-s3_list_libraries() {  # $1 = any non-empty value forces a refresh
+# Cached anyway on S3 (default 1 h, SCHED_LIB_CACHE_TTL=0 to force) because the
+# plain dump the TUI polls every 2 s must never call AWS.
+list_libraries() {  # $1 = any non-empty value forces a refresh
     local force="${1:-}" cache="${LOG_DIR:-/tmp}/.libraries"
     local ttl="${SCHED_LIB_CACHE_TTL:-3600}" age=999999 tmp
 
-    if [ "$SCHED_FAKE_S3" = "1" ]; then
+    if _use_fake_s3; then
         awk '$1 == "input" { print $2 }' "$SCHED_FAKE_S3_FILE" 2>/dev/null | sort -u
+        return 0
+    fi
+    if store_is_local; then
+        [ -d "${DATA_DIR%/}/input" ] || return 0
+        find "${DATA_DIR%/}/input" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+            | sed 's#.*/##' | sort -u
         return 0
     fi
 
     if [ -f "$cache" ]; then
-        age=$(( $(date -u +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+        age=$(( $(date -u +%s) - $(file_mtime "$cache") ))
     fi
     if [ -n "$force" ] || [ ! -f "$cache" ] || [ "$age" -ge "$ttl" ]; then
         tmp="${cache}.tmp.$$"
@@ -466,13 +579,62 @@ read_driver_info() {
 # is the whole `tmux new-session ... run-model-queue.sh ...` command that started
 # it, as one word, and it outlives the scheduler session while any other session
 # exists; with no LOG_DIR of its own it would pass for a driver.
+#
+# Linux reads the real argv from /proc. Elsewhere `ps` joins argv with spaces, so
+# only the first two words are trusted: the script itself, or an interpreter
+# running it — never a word buried in someone else's command line.
 is_driver_process() {  # $1 = pid
-    local arg
-    [ -r "/proc/$1/cmdline" ] || return 1
-    while IFS= read -r -d '' arg; do
-        case "$arg" in */run-model-queue.sh|run-model-queue.sh) return 0 ;; esac
-    done < "/proc/$1/cmdline"
+    local arg cmd first second
+    if [ -r "/proc/$1/cmdline" ]; then
+        while IFS= read -r -d '' arg; do
+            case "$arg" in */run-model-queue.sh|run-model-queue.sh) return 0 ;; esac
+        done < "/proc/$1/cmdline"
+        return 1
+    fi
+    [ -d /proc/self ] && return 1        # Linux, and the process is gone
+    cmd="$(ps -o command= -p "$1" 2>/dev/null)" || return 1
+    read -r first second _ <<< "$cmd"
+    case "$first" in */run-model-queue.sh|run-model-queue.sh) return 0 ;; esac
+    case "$first" in *bash|*/sh|sh)
+        case "$second" in */run-model-queue.sh|run-model-queue.sh) return 0 ;; esac ;;
+    esac
     return 1
+}
+
+# --- driver registry ----------------------------------------------------------
+# Every driver registers itself here while it runs: one file per pid, holding its
+# LOG_DIR and script directory. It is how drivers are found where /proc does not
+# exist (macOS), and on Linux it sits beside the /proc scan, which still finds a
+# driver started before the registry did.
+registry_dir() { echo "${SCHED_REGISTRY_DIR:-${HOME:-/tmp}/.config/model-launcher/drivers}"; }
+
+registry_add() {  # $1 = log_dir  $2 = script_dir ; registers THIS process ($$)
+    local d; d="$(registry_dir)"
+    mkdir -p "$d" 2>/dev/null || return 0
+    { printf 'log_dir=%s\n' "$1"; printf 'script_dir=%s\n' "$2"; } > "${d}/$$.tmp" 2>/dev/null \
+        && mv -f "${d}/$$.tmp" "${d}/$$"
+}
+
+registry_remove() { rm -f "$(registry_dir)/$$" 2>/dev/null; }
+
+# Live registered drivers, one "pid<TAB>log_dir<TAB>script_dir" per line. An entry
+# whose pid is gone, or is no longer a driver (a reused pid), is dropped.
+registry_list() {
+    local d f pid ld sd
+    d="$(registry_dir)"
+    [ -d "$d" ] || return 0
+    for f in "$d"/*; do
+        [ -f "$f" ] || continue
+        pid="${f##*/}"
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        if ! kill -0 "$pid" 2>/dev/null || ! is_driver_process "$pid"; then
+            rm -f "$f" 2>/dev/null
+            continue
+        fi
+        ld="$(sed -n 's/^log_dir=//p' "$f" | head -n 1)"
+        sd="$(sed -n 's/^script_dir=//p' "$f" | head -n 1)"
+        printf '%s\t%s\t%s\n' "$pid" "$ld" "$sd"
+    done
 }
 
 # PID of a running driver for THIS $LOG_DIR, if any.
@@ -486,12 +648,19 @@ is_driver_process() {  # $1 = pid
 # make the production scheduler (a different LOG_DIR entirely) look like a
 # legacy pre-upgrade driver. The queue file path is a positional argument and
 # would appear in `pgrep -f`'s match, but LOG_DIR is only ever passed as an
-# environment variable, which does not appear in a process's argv — so the
-# only reliable way to identify "the driver for this LOG_DIR" is to read each
-# candidate's own environment. This requires /proc, hence Linux only, which
-# matches the rest of this codebase (grep -P, stat -c, ...).
+# environment variable, which does not appear in a process's argv — so a driver
+# is identified by what it registered (every OS), or else by reading its own
+# environment from /proc (Linux; a driver that predates the registry).
 driver_pid_scan() {
-    local pid want="${LOG_DIR:-}" candidates
+    local pid want="${LOG_DIR:-}" candidates ld sd
+    while IFS=$'\t' read -r pid ld sd; do
+        [ -n "$pid" ] || continue
+        if [ -z "$want" ] || [ "$ld" = "$want" ]; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+    done < <(registry_list)
+    [ -d /proc/self ] || return 0
     candidates="$(pgrep -u "$(id -u)" -f 'run-model-queue\.sh' 2>/dev/null)"
     [ -n "$candidates" ] || return 0
     if [ -z "$want" ]; then
@@ -535,7 +704,8 @@ driver_is_legacy() {
 control_post() {
     local d; d="$(control_dir)"
     mkdir -p "$d"
-    local f="${d}/$(date -u +%s%N).$$.$1"
+    # Seconds, then pid and RANDOM: unique without GNU date's %N.
+    local f="${d}/$(date -u +%s).$$.${RANDOM}.$1"
     { printf '%s\n' "${2:-}"; printf '%s\n' "${3:-}"; } > "${f}.tmp" && mv -f "${f}.tmp" "$f"
 }
 

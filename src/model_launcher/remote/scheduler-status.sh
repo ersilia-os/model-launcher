@@ -3,18 +3,23 @@
 # Wave scheduler — status renderer.
 # =============================================================================
 # Reads the driver's state TSV and prints a table. For rows that ran (or are
-# running), it recomputes done/total LIVE from S3, so a currently-running model
+# running), it recomputes done/total LIVE (from S3, or from DATA_DIR when
+# DISPATCH=serve), so a currently-running model
 # shows live progress even though the driver only rewrites the state file on
 # transitions. Read-only and safe to run anytime, including under:
 #   watch -n 30 scheduler-status.sh
 #
 # Usage: scheduler-status.sh [--no-s3] [state_file]
-#        --no-s3   trust the driver's recorded counts; make no `aws s3 ls` calls
+#        --no-s3   trust the driver's recorded counts; make no listing calls
 #                  (instant, and safe to loop on a tight interval)
-# Env:   S3_BUCKET (default ai2050-ersilia-cluster), LOG_DIR / STATE_FILE for the default path.
+# Env:   S3_BUCKET (default ai2050-ersilia-cluster), DISPATCH, DATA_DIR,
+#        LOG_DIR / STATE_FILE for the default path.
 # =============================================================================
 
 set -uo pipefail
+
+# A bash >= 4 and, on macOS, Homebrew's tools, before anything else runs.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bash-floor.sh" || exit 1
 
 NO_S3=0
 POS=()
@@ -57,8 +62,8 @@ while IFS=$'\t' read -r idx model mode lib status s_done s_total started fin log
     if [ "$NO_S3" -eq 0 ]; then
         case "$status" in
             pending|running|done|failed|cancelled|held)
-                tcount="$(s3_count_input "$lib")"
-                dcount="$(s3_count_output "$model" "$lib" "$mode")"
+                tcount="$(count_input "$lib")"
+                dcount="$(count_output "$model" "$lib" "$mode")"
                 ;;
         esac
     fi

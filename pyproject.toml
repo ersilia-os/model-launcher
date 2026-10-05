@@ -38,5 +38,5 @@ model_launcher = ["tui/*.tcss", "remote/**"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-  "linux_only: needs setsid and /proc, which the scheduler assumes; skipped elsewhere",
+  "linux_only: needs something only Linux has (e.g. systemd); skipped elsewhere",
 ]

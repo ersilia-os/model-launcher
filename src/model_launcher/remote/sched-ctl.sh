@@ -38,7 +38,7 @@
 #
 # Inspection:
 #   list                         the queue with live statuses (no S3 calls)
-#   status                       delegates to scheduler-status.sh (live S3 counts)
+#   status                       delegates to scheduler-status.sh (live counts)
 #   dump [--log <path>] [--live|--live-all]
 #                                one machine-readable snapshot (used by the TUI).
 #                                --live     recount totals + the running row from S3
@@ -46,7 +46,7 @@
 #
 # <sel> is a model id (eos12x7_v1) or a 1-based queue position (3).
 #
-# Env: LOG_DIR (default /shared/logs/scheduler), S3_BUCKET, QUEUE_FILE.
+# Env: LOG_DIR (default /shared/logs/scheduler), S3_BUCKET, DISPATCH, DATA_DIR, QUEUE_FILE.
 #      With a driver running, the queue file is discovered from driver.info.
 #
 # --who identifies the operator for the audit log and cancellation notes.
@@ -60,6 +60,9 @@
 # =============================================================================
 
 set -uo pipefail
+
+# A bash >= 4 and, on macOS, Homebrew's tools, before anything else runs.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bash-floor.sh" || exit 1
 
 usage() { sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -91,7 +94,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Precedence, high to low: CLI flag > environment > this file > the built-in
 # default hardcoded below. This must run before `--log-dir` is folded in, so
 # an explicit flag still wins over anything the conf sets.
-SCHEDULER_CONF="${SCHEDULER_CONF:-${SCRIPT_DIR}/scheduler.conf}"
+# Beside the scripts; else, for a pip-installed copy (whose folder `pip install -U`
+# replaces), ~/.config/model-launcher/scheduler.conf. An explicit SCHEDULER_CONF wins.
+if [ -z "${SCHEDULER_CONF:-}" ]; then
+    SCHEDULER_CONF="${SCRIPT_DIR}/scheduler.conf"
+    [ -f "$SCHEDULER_CONF" ] || SCHEDULER_CONF="${HOME:-}/.config/model-launcher/scheduler.conf"
+fi
 # shellcheck source=/dev/null
 [ -f "$SCHEDULER_CONF" ] && source "$SCHEDULER_CONF"
 
@@ -99,11 +107,13 @@ LOG_DIR="${CLI_LOG_DIR:-${LOG_DIR:-/shared/logs/scheduler}}"
 S3_BUCKET="${S3_BUCKET:-ai2050-ersilia-cluster}"
 SIF_DIR="${SIF_DIR:-/shared/sif-files}"
 DISPATCH="${DISPATCH:-slurm}"
+DATA_DIR="${DATA_DIR:-}"
 
 LIB="${SCRIPT_DIR}/scheduler-lib.sh"
 [ -f "$LIB" ] || LIB="/shared/scripts/scheduler/scheduler-lib.sh"
 # shellcheck source=/dev/null
 source "$LIB" || { echo "ERROR: cannot source scheduler-lib.sh ($LIB)"; exit 1; }
+check_store_config || exit 1
 
 STATE_FILE="${STATE_FILE:-${LOG_DIR}/state.tsv}"
 STATUS_FILE="${STATUS_FILE:-${LOG_DIR}/status.tsv}"
@@ -338,6 +348,10 @@ cmd_add() {
     case "$mode" in ersilia|singularity) ;; *)
         echo "ERROR: mode must be ersilia or singularity (got '$mode')" >&2; return 1 ;;
     esac
+    if [ "$mode" = "singularity" ] && store_is_local; then
+        echo "ERROR: singularity needs DISPATCH=slurm; this machine runs models with ersilia serve" >&2
+        return 1
+    fi
     if [ -n "$wave" ] && { ! [[ "$wave" =~ ^[0-9]+$ ]] || [ "$wave" -lt 1 ] || [ "$wave" -gt 1000 ]; }; then
         echo "ERROR: wave_size must be 1..1000 (got '$wave')" >&2; return 1
     fi
@@ -605,8 +619,13 @@ cmd_cancel() {
         # name the wrong library. WHO travels as a second line so the eventual
         # "cancelled" status note can say who asked for it.
         control_post cancel "$key" "$WHO"
-        echo "cancel requested for RUNNING ${label} — the driver will scancel its"
-        echo "in-flight SLURM array and move on (within ${CTL_POLL:-15}s)."
+        if store_is_local; then
+            echo "cancel requested for RUNNING ${label} — the driver will stop it, close"
+            echo "the model and move on (within ${CTL_POLL:-15}s)."
+        else
+            echo "cancel requested for RUNNING ${label} — the driver will scancel its"
+            echo "in-flight SLURM array and move on (within ${CTL_POLL:-15}s)."
+        fi
     else
         _do() { load_blocks; local i; i="$(resolve_key "$key")" || return 1
                 set_hold_flag "$i" 1; write_blocks; }
@@ -672,7 +691,8 @@ cmd_list() {
 cmd_status() {
     local s="${SCRIPT_DIR}/scheduler-status.sh"
     [ -x "$s" ] || s="/shared/scripts/scheduler/scheduler-status.sh"
-    S3_BUCKET="$S3_BUCKET" LOG_DIR="$LOG_DIR" "$s" "$STATE_FILE"
+    S3_BUCKET="$S3_BUCKET" DISPATCH="$DISPATCH" DATA_DIR="$DATA_DIR" LOG_DIR="$LOG_DIR" \
+        "$s" "$STATE_FILE"
 }
 
 # Recount progress from S3, the same way scheduler-status.sh does.
@@ -695,7 +715,7 @@ emit_counts() {  # $1 = scope: running | all
         [ -n "$lib" ] || continue
         key="$(job_key "${BLK_MODEL[i]}" "${BLK_MODE[i]}" "$lib")"
         if [ -z "${INPUT_CACHE[$lib]+x}" ]; then
-            INPUT_CACHE[$lib]="$(s3_count_input "$lib")"
+            INPUT_CACHE[$lib]="$(count_input "$lib")"
         fi
         tt="${INPUT_CACHE[$lib]}"
         st="${ST_STATUS[$key]:-}"
@@ -704,7 +724,7 @@ emit_counts() {  # $1 = scope: running | all
         [ -n "$st" ] || st="$(status_of_key "$key" 2>/dev/null || echo pending)"
         dn=""
         if [ "$scope" = "all" ] || [ "$st" = "running" ]; then
-            dn="$(s3_count_output "${BLK_MODEL[i]}" "$lib" "${BLK_MODE[i]}")"
+            dn="$(count_output "${BLK_MODEL[i]}" "$lib" "${BLK_MODE[i]}")"
         fi
         printf '%s\t%s\t%s\n' "$key" "$dn" "$tt"
     done
@@ -749,6 +769,7 @@ cmd_dump() {
     # backend exists. A client that predates this key sees nothing here, which
     # is fine — the field is additive, like every other line in this section.
     echo "dispatch=${DISPATCH}"
+    echo "data_dir=${DATA_DIR}"
     echo "now=$(now_iso)"
 
     echo "---8<--- driver.info"
@@ -799,13 +820,15 @@ cmd_dump() {
     # was absent from the dropdown unless it happened to be in the queue already.
     # Refreshed from S3 on a --live dump, served from cache otherwise.
     {
-        s3_list_libraries ${live:+refresh}
-        for cand in "${SCRIPT_DIR}/library-aliases.sh" \
+        list_libraries ${live:+refresh}
+        # The alias table names the cluster's S3 libraries; a serve machine has
+        # only the folders under DATA_DIR/input, which list_libraries gave above.
+        store_is_local || for cand in "${SCRIPT_DIR}/library-aliases.sh" \
                     /shared/scripts/library-aliases.sh \
                     "${SCRIPT_DIR}/../../AWS_templates/library-aliases.sh" \
                     /shared/scripts/AWS_templates/library-aliases.sh; do
             [ -f "$cand" ] || continue
-            grep -oP 'echo\s+"\K[A-Za-z][A-Za-z0-9_.]*(?=")' "$cand" 2>/dev/null
+            sed -nE 's/.*echo[[:space:]]+"([A-Za-z][A-Za-z0-9_.]*)".*/\1/p' "$cand" 2>/dev/null
             break
         done
         [ -f "$STATE_FILE" ] && awk -F'\t' '$1 !~ /^#/ && $4 != "" {print $4}' "$STATE_FILE"

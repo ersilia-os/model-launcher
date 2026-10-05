@@ -1,8 +1,9 @@
 # Running Ersilia models over large chemical libraries
 
 Queue up Ersilia models, run them one at a time over a chemical library, and
-watch progress from a terminal dashboard. Jobs are dispatched to an AWS
-ParallelCluster through SLURM; progress is the number of result files in S3, so
+watch progress from a terminal dashboard. Jobs run on an AWS ParallelCluster
+through SLURM, with results in S3, or on a workstation or Mac with the ersilia
+CLI, with results on its own disk. Progress is the number of result files, so
 every run resumes where it left off.
 
 The package is a thin client. All scheduling logic is the bash layer under
@@ -20,15 +21,8 @@ pip install git+https://github.com/ersilia-os/model-launcher.git
 ```
 
 > [!IMPORTANT]
-> **The scheduler runs on Linux only** (it needs bash ≥ 4, `flock`, `setsid`
-> and `/proc`). From a Mac, use the client to drive a Linux `--host`; that
-> needs nothing extra. To run the test suite on a Mac, first:
->
-> ```bash
-> brew install bash flock   # check: `bash --version` must say 5.x
-> ```
->
-> Tests that need `setsid` or `/proc` are then skipped (`linux_only`).
+> **On a Mac**, the client needs nothing extra. To run models there too, first
+> `brew install bash flock` and install Docker Desktop.
 
 ## Quick start
 
@@ -51,6 +45,7 @@ runs on the local machine.
 | `model-launcher` | Open the dashboard (same as `tui`) |
 | `model-launcher tui` | Watch and steer the queue full-screen |
 | `model-launcher check` | Print transport, driver state and per-job progress, then exit |
+| `model-launcher setup` | Set up this computer to run models with the ersilia CLI, and start its service |
 | `model-launcher --list-hosts` | List the machines available as `--host` targets (SSH config and tailnet) |
 
 Run `--help` on any command for its options.
@@ -69,11 +64,12 @@ while a run is in flight.
 `cpus=N` (override the per-task CPU count), recognised anywhere after the model
 id. Omitting `cpus` leaves the worker's own `#SBATCH` default in charge.
 
-## Deploying the scheduler to a machine
+## Making a machine run models
 
-The Python package only gets you the dashboard — the scheduler itself is bash
-that has to be copied onto the target machine separately. See
-[`docs/deploying.md`](docs/deploying.md).
+- **A workstation or a Mac:** install the package on it and run
+  `model-launcher setup`.
+- **The SLURM cluster:** the scheduler is copied onto the head node by hand; see
+  [`docs/deploying.md`](docs/deploying.md).
 
 ## Attribution
 
@@ -86,7 +82,7 @@ who ran every mutating command, and cancellation notes say who asked.
 
 ```bash
 pip install -e ".[dev]"
-pytest          # 193 tests, no cluster and no AWS credentials needed (macOS: see the note above)
+pytest          # no cluster and no AWS credentials needed; macOS: brew install bash flock
 ruff check . && ruff format .
 ```
 
@@ -95,6 +91,7 @@ The test suite drives the real bash scheduler against a fake S3 fixture
 `aws`, `sbatch`, `squeue` and `scancel` on `PATH`. `tests/test_invariants.py`
 pins the fourteen invariants documented in the original `HANDOFF.md`, each of
 which was written after a production bug — read it before changing the bash.
+CI runs the suite on Linux and macOS.
 
 ## About the Ersilia Open Source Initiative
 

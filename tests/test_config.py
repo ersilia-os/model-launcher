@@ -214,10 +214,15 @@ def test_dispatch_defaults_to_slurm(scheduler):
 
 
 def test_dispatch_is_conf_overridable(scheduler):
-    _write_conf(scheduler, 'DISPATCH="${DISPATCH:-serve}"')
+    _write_conf(
+        scheduler,
+        'DISPATCH="${DISPATCH:-serve}"\nDATA_DIR="${DATA_DIR:-/data/launcher}"',
+    )
     proc = scheduler.ctl("dump", SCHEDULER_CONF=str(scheduler.root / "scheduler.conf"))
 
-    assert parse_dump(proc.stdout).dispatch == "serve"
+    snap = parse_dump(proc.stdout)
+    assert snap.dispatch == "serve"
+    assert snap.data_dir == "/data/launcher"
 
 
 def test_sif_dir_is_published(scheduler):

@@ -13,6 +13,7 @@ convention.
 
 from __future__ import annotations
 
+import itertools
 import os
 import shutil
 import signal
@@ -31,20 +32,19 @@ from model_launcher.core.remote import remote_dir
 def pytest_collection_modifyitems(config, items):
     """Skip ``linux_only`` tests off Linux.
 
-    The scheduler targets Linux: it launches the orchestrator under ``setsid``
-    and finds drivers through ``/proc``. macOS has neither, so a job started
-    there exits at once and a running driver cannot be discovered.
+    The scheduler itself runs on Linux and macOS alike. What stays Linux-only is
+    what only Linux has, such as systemd.
     """
     if sys.platform.startswith("linux"):
         return
-    skip = pytest.mark.skip(reason="needs Linux (setsid, /proc)")
+    skip = pytest.mark.skip(reason="needs Linux")
     for item in items:
         if "linux_only" in item.keywords:
             item.add_marker(skip)
 
 
 #: Stubs that record their argv, so a test can assert what the scheduler invoked.
-STUB_BINARIES = ("aws", "sbatch", "squeue", "scancel")
+STUB_BINARIES = ("aws", "sbatch", "squeue", "scancel", "ersilia")
 
 STUB_TEMPLATE = """\
 #!/bin/bash
@@ -52,26 +52,71 @@ printf '%s\\n' "$* " >> "$STUB_CALL_LOG.{name}"
 exit 0
 """
 
-#: `aws` has to answer plausibly, not just record: `s3_list_libraries` refuses to
+#: `aws` has to answer plausibly, not just record: `list_libraries` refuses to
 #: cache an empty result (a transient AWS failure must not blank the dropdown for
 #: an hour), so a stub that printed nothing would re-call on every dump and the
 #: warm-cache half of invariant 11 could never be observed.
+#:
+#: Like the real CLI, a prefix with nothing under it exits 1 with a silent stderr;
+#: ``AWS_STUB_FAIL=<message>`` makes every call fail the way missing credentials
+#: do, with the message on stderr.
 AWS_STUB = """\
 #!/bin/bash
 printf '%s\\n' "$* " >> "$STUB_CALL_LOG.aws"
+if [ -n "${AWS_STUB_FAIL:-}" ]; then echo "$AWS_STUB_FAIL" >&2; exit 255; fi
 url="${@: -1}"
 case "$url" in
     */input/)
         printf '%27s%s\\n' "PRE " "testlib/"
         ;;
-    */input/*/)
+    */input/testlib/)
         for i in 1 2 3; do
             printf '2026-01-01 00:00:00        100 testlib_chunk_00000%s.csv\\n' "$i"
         done
         ;;
+    *)
+        exit 1
+        ;;
 esac
 exit 0
 """
+
+
+#: A fake `ersilia` CLI for DISPATCH=serve. It records every call, and `run`
+#: writes one `key,input,value` row per input row, like the real one. A run on a
+#: chunk named in the file $FAKE_ERSILIA_FAIL_FILE exits 1; FAKE_ERSILIA_SLOW
+#: makes each run take that many seconds (a real child, so cancel is exercised).
+ERSILIA_STUB = """\
+#!/bin/bash
+printf '%s\\n' "$* " >> "$STUB_CALL_LOG.ersilia"
+case "$1" in
+    run)
+        shift
+        while [ "$#" -gt 0 ]; do
+            case "$1" in -i) in="$2"; shift ;; -o) out="$2"; shift ;; esac
+            shift
+        done
+        if [ -n "${FAKE_ERSILIA_FAIL_FILE:-}" ] && [ -f "$FAKE_ERSILIA_FAIL_FILE" ] \\
+           && grep -qxF "$(basename "$in")" "$FAKE_ERSILIA_FAIL_FILE"; then
+            echo "fake ersilia: run failed" >&2; exit 1
+        fi
+        # Like the real CLI, Ctrl-C (SIGINT) ends a run; SIGTERM may be ignored.
+        if [ "${FAKE_ERSILIA_SLOW:-0}" != 0 ]; then
+            sleep "$FAKE_ERSILIA_SLOW" & nap=$!
+            trap 'kill -KILL "$nap" 2>/dev/null; echo interrupted >&2; exit 130' INT
+            wait "$nap"
+        fi
+        { echo "key,input,value"; tail -n +2 "$in" | sed 's/^/k,/; s/$/,1/'; } > "$out"
+        ;;
+esac
+exit 0
+"""
+
+
+#: Each instance's fake orchestrators sleep for a different number of seconds, so
+#: ``pgrep -f "sleep <n>"`` finds exactly that instance's children on any OS —
+#: no /proc environment to read, and never another test's (or anyone's) sleep.
+_FAKE_DURATIONS = itertools.count(600_001 + os.getpid() % 1000 * 1000)
 
 
 def _wait_for(predicate, timeout: float = 20.0, interval: float = 0.05) -> bool:
@@ -95,6 +140,7 @@ class Scheduler:
     call_log: Path
     fake_s3: bool = True
     default_library: str = "testlib"
+    fake_duration: str = field(default_factory=lambda: str(next(_FAKE_DURATIONS)))
     _drivers: list[subprocess.Popen] = field(default_factory=list)
 
     # -- environment ------------------------------------------------------
@@ -111,7 +157,13 @@ class Scheduler:
             REFRESH_SECONDS="1",
             SCHED_FAKE_S3="1" if self.fake_s3 else "0",
             SCHED_FAKE_S3_FILE=str(self.log_dir / "fake-s3.txt"),
-            SCHED_FAKE_DURATION="600",
+            SCHED_FAKE_DURATION=self.fake_duration,
+            # Explicit, so a developer's ~/.config/model-launcher/scheduler.conf
+            # can never leak into a test. Tests that want a conf write this file.
+            SCHEDULER_CONF=str(self.root / "scheduler.conf"),
+            # Same reason: drivers started by tests register here, never in
+            # the developer's ~/.config/model-launcher/drivers.
+            SCHED_REGISTRY_DIR=str(self.root / "drivers"),
         )
         env.update(overrides)
         return env
@@ -180,8 +232,10 @@ class Scheduler:
         proc = self.ctl("dump", *args)
         return parse_dump(proc.stdout)
 
-    def start_driver(self, *extra: str, **env: str) -> subprocess.Popen:
-        """Start the driver in dry-run and return the process.
+    def start_driver(
+        self, *extra: str, dry_run: bool = True, **env: str
+    ) -> subprocess.Popen:
+        """Start the driver (in dry-run unless told otherwise) and return the process.
 
         Combined stdout/stderr goes to ``driver.log`` in ``log_dir``, matching
         the ``tee -a $LOG_DIR/driver.log`` a real deployment uses — a test can
@@ -196,7 +250,7 @@ class Scheduler:
             self.default_library,
             "1000",
             "cpu-queue",
-            "--dry-run",
+            *(["--dry-run"] if dry_run else []),
             *extra,
         ]
         # Pin the working directory: anything the scheduler writes to a relative
@@ -239,9 +293,12 @@ class Scheduler:
             raise AssertionError("driver never wrote driver.info")
 
     def sleep_children(self) -> list[int]:
-        """PIDs of the fake orchestrators (``sleep 600``) this instance started."""
+        """PIDs of the fake orchestrators (``sleep <fake_duration>``) this instance started."""
         proc = subprocess.run(
-            ["pgrep", "-f", "sleep 600"], capture_output=True, check=False, text=True
+            ["pgrep", "-f", f"sleep {self.fake_duration}"],
+            capture_output=True,
+            check=False,
+            text=True,
         )
         return [int(p) for p in proc.stdout.split()]
 
@@ -259,10 +316,17 @@ class Scheduler:
 
 
 @pytest.fixture
-def scheduler(tmp_path: Path) -> Scheduler:
+def scheduler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scheduler:
     """A scheduler instance in a temporary directory, with recording stubs."""
     if shutil.which("bash") is None:  # pragma: no cover - environment guard
         pytest.skip("bash is required to exercise the scheduler")
+    # Discovery run from the test process itself (probe_host, discover_drivers
+    # through a LocalRunner) must read the registry this instance's drivers
+    # write. Linux would still find them through /proc; macOS only has this.
+    monkeypatch.setenv("SCHED_REGISTRY_DIR", str(tmp_path / "drivers"))
+    # Likewise ctl run from the test process must never read this machine's own
+    # ~/.config/model-launcher/scheduler.conf.
+    monkeypatch.setenv("SCHEDULER_CONF", str(tmp_path / "scheduler.conf"))
 
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
@@ -270,7 +334,8 @@ def scheduler(tmp_path: Path) -> Scheduler:
     stub_bin.mkdir()
     for name in STUB_BINARIES:
         stub = stub_bin / name
-        stub.write_text(AWS_STUB if name == "aws" else STUB_TEMPLATE.format(name=name))
+        special = {"aws": AWS_STUB, "ersilia": ERSILIA_STUB}
+        stub.write_text(special.get(name) or STUB_TEMPLATE.format(name=name))
         stub.chmod(0o755)
 
     instance = Scheduler(

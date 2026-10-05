@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from model_launcher.core.discover import HostStatus, probe_host
+from model_launcher.core.discover import Driver, HostStatus, probe_host
 from model_launcher.core.hosts import Target, load_last_host, save_last_host
 from model_launcher.core.model import Job, Snapshot
 from model_launcher.core.remote import ctl_path
@@ -68,7 +68,6 @@ def test_percent_never_reads_finished_or_unstarted_while_partway():
     assert draw.columns(120).percent == 114  # the spec's grid, exactly
 
 
-@pytest.mark.linux_only
 def test_dashboard_selects_the_running_job_and_filters(environment):
     scheduler = environment
     scheduler.write_queue("eos_run ersilia testlib\neos_wait ersilia testlib\n")
@@ -304,7 +303,6 @@ def test_switching_host_forgets_the_old_hosts_counts(environment):
     asyncio.run(scenario())
 
 
-@pytest.mark.linux_only
 def test_probe_reports_a_running_driver(running_scheduler, monkeypatch):
     status = probe_host(None)
     mine = [d for d in status.drivers if d.log_dir == str(running_scheduler.log_dir)]
@@ -331,3 +329,64 @@ def test_last_host_round_trip_survives_a_broken_file(monkeypatch, tmp_path):
     path.mkdir()  # unreadable as a file
     assert load_last_host() is None
     save_last_host("x")  # must not raise
+
+
+def test_the_hosts_screen_shows_other_hosts_queues(environment, monkeypatch):
+    """Not only the connected host: every RUNNING host gets its queue strip."""
+    scheduler = environment
+    scheduler.start_driver()
+    scheduler.wait_for_driver_info()
+    drivers = (Driver(11, "/l1", "/c1"), Driver(12, "/l2", "/c2"))
+    monkeypatch.setattr(
+        hosts_mod,
+        "available_targets",
+        lambda: [Target(name="mac", via="ssh+tailscale", detail="macOS")],
+    )
+    monkeypatch.setattr(
+        hosts_mod,
+        "probe_host",
+        lambda host: (
+            HostStatus("running", drivers=drivers) if host else HostStatus("none")
+        ),
+    )
+    queue = Snapshot(
+        jobs=[
+            Job(1, "eos3b5e", "ersilia", "big", status="running", done=1, total=3),
+            Job(2, "eos4e40", "ersilia", "big"),
+        ]
+    )
+    monkeypatch.setattr(
+        hosts_mod, "peek_queue", lambda host, driver, bucket=None: queue
+    )
+
+    async def scenario():
+        app = SchedulerTUI(None, refresh_interval=0.2, live_interval=0, options={})
+        async with app.run_test(size=(120, 34)) as pilot:
+            await _until(pilot, lambda: isinstance(app.screen, HostScreen))
+            await _until(pilot, lambda: "mac" in app.screen._peeked)
+            row = app.screen.rows["mac"]
+            return app.screen._slot(row)
+
+    slot = asyncio.run(scenario())
+    assert slot.strip == ("running", "pending")
+    assert slot.running == ("eos3b5e", 1, 3)
+    assert slot.recorded is True
+    assert slot.others == 1
+
+
+def test_another_hosts_counts_are_marked_as_recorded():
+    slot = draw.HostSlot(
+        name="mac",
+        detail="macOS",
+        via="ssh+tailscale",
+        state="running",
+        status="RUNNING · 2 drivers",
+        strip=("running",),
+        running=("eos3b5e", 1, 3),
+        recorded=True,
+        others=1,
+    )
+    lines, _ = draw.hosts_view(120, 32, tokens(True), "All hosts", "", [slot], 0, 0)
+    text = "\n".join(line.plain for line in lines)
+    assert "eos3b5e · last recount" in text
+    assert "1 job · +1 more" in text

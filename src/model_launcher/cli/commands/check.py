@@ -56,6 +56,7 @@ def check(ctx):
     if snap.driver_alive and snap.driver_pid:
         state.append(f" (pid {snap.driver_pid})", style="muted")
     facts.add_row("driver", state)
+    facts.add_row("dispatch", Text(snap.dispatch, style="muted"))
     facts.add_row("queue", Text(snap.queue_file or "—", style="muted"))
     facts.add_row("jobs", Text(str(len(snap.jobs))))
     facts.add_row("", counts_text(snap))

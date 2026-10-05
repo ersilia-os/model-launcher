@@ -35,6 +35,9 @@
 #
 # Env:
 #   S3_BUCKET        (default ai2050-ersilia-cluster)   passed through to the orchestrators
+#   DISPATCH         slurm | serve (default slurm)       serve counts files under DATA_DIR, not S3
+#   DATA_DIR         (serve only) folder holding input/<lib>/ and output/<lib>/<model>/
+#   ERSILIA_BIN      (serve only, default ersilia) the ersilia CLI that runs each job
 #   POLL_SECONDS     (default 30)                        passed through to the orchestrators
 #   ON_FAIL          continue | halt   (default continue)
 #   AUTO_FETCH_SIF   0 | 1             (default 0 — do NOT download; missing SIF => missing-files)
@@ -43,7 +46,7 @@
 #   STATUS_FILE      (default $LOG_DIR/status.tsv)
 #   CTL_POLL         (default 15)   how often to check control requests while a job runs
 #   IDLE_POLL        (default 30)   how often to re-read the queue when it has nothing runnable
-#   REFRESH_SECONDS  (default 300)  how often to re-count S3 progress for the running job
+#   REFRESH_SECONDS  (default 300)  how often to re-count progress for the running job
 #   EXIT_WHEN_EMPTY  0 | 1 (default 0 — idle and wait for queue changes instead of exiting)
 #   SCHED_FAKE_RC    (dry-run only) space-separated fake exit codes by queue index, for testing
 #   SCHED_FAKE_S3    (test only) 1 => count from a fixture instead of `aws s3 ls` (see the lib)
@@ -51,8 +54,11 @@
 
 set -uo pipefail
 
+# A bash >= 4 and, on macOS, Homebrew's tools, before anything else runs.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bash-floor.sh" || exit 1
+
 usage() {
-    sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 # ---- args: separate flags from positionals ----
@@ -80,7 +86,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A DEFAULTS file, not an assignment file — see scheduler.conf.example.
 # Precedence, high to low: CLI flag/positional > environment > this file >
 # the built-in default hardcoded below.
-SCHEDULER_CONF="${SCHEDULER_CONF:-${SCRIPT_DIR}/scheduler.conf}"
+# Beside the scripts; else, for a pip-installed copy (whose folder `pip install -U`
+# replaces), ~/.config/model-launcher/scheduler.conf. An explicit SCHEDULER_CONF wins.
+if [ -z "${SCHEDULER_CONF:-}" ]; then
+    SCHEDULER_CONF="${SCRIPT_DIR}/scheduler.conf"
+    [ -f "$SCHEDULER_CONF" ] || SCHEDULER_CONF="${HOME:-}/.config/model-launcher/scheduler.conf"
+fi
 # shellcheck source=/dev/null
 [ -f "$SCHEDULER_CONF" ] && source "$SCHEDULER_CONF"
 
@@ -92,6 +103,12 @@ POLL_SECONDS="${POLL_SECONDS:-30}"
 ON_FAIL="${ON_FAIL:-continue}"
 AUTO_FETCH_SIF="${AUTO_FETCH_SIF:-0}"
 SIF_DIR="${SIF_DIR:-/shared/sif-files}"
+DISPATCH="${DISPATCH:-slurm}"
+DATA_DIR="${DATA_DIR:-}"
+ERSILIA_BIN="${ERSILIA_BIN:-ersilia}"
+# How long a cancelled serve job gets to run `ersilia close` before SIGKILL. The
+# close stops a Docker container, which takes ~10 s.
+SERVE_STOP_SECONDS="${SERVE_STOP_SECONDS:-60}"
 DOWNLOAD_SCRIPT="${DOWNLOAD_SCRIPT:-/shared/scripts/download-ersilia-model.sh}"
 LOG_DIR="${LOG_DIR:-/shared/logs/scheduler}"
 # Exported so every child (ctl helpers, orchestrators) resolves the same value.
@@ -118,6 +135,14 @@ LIB="${SCRIPT_DIR}/scheduler-lib.sh"
 [ -f "$LIB" ] || LIB="/shared/scripts/scheduler/scheduler-lib.sh"
 # shellcheck source=/dev/null
 source "$LIB" || { echo "ERROR: cannot source scheduler-lib.sh ($LIB)"; exit 1; }
+check_store_config || exit 1
+# serve runs every job through the ersilia CLI, so it has to be there. A dry run
+# launches nothing and needs no ersilia.
+if store_is_local && [ "$DRY_RUN" -ne 1 ] && ! command -v "$ERSILIA_BIN" >/dev/null 2>&1; then
+    echo "ERROR: DISPATCH=serve needs the ersilia CLI, and ERSILIA_BIN='${ERSILIA_BIN}' is not found." >&2
+    echo "       Set ERSILIA_BIN in scheduler.conf, e.g. to a conda env's bin/ersilia." >&2
+    exit 1
+fi
 
 # ---- library-aliases (resolve_library); passthrough if not deployed ----
 # The packaged copy beside this script is checked first; the /shared paths are
@@ -140,6 +165,8 @@ fi
 WAVES_DIR="${WAVES_DIR:-${SCRIPT_DIR}/slurm}"
 [ -f "${WAVES_DIR}/submit-ersilia-waves.sh" ] || WAVES_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 [ -f "${WAVES_DIR}/submit-ersilia-waves.sh" ] || WAVES_DIR="/shared/scripts/scheduler/slurm"
+# DISPATCH=serve runs this one instead of a wave orchestrator.
+SERVE_SCRIPT="${SCRIPT_DIR}/serve/run-ersilia-serve.sh"
 
 mkdir -p "$LOG_DIR" "$(control_dir)"
 
@@ -157,6 +184,11 @@ LOCK_FILE="${LOG_DIR}/.driver.lock"
 LEGACY_LOCK="${LOG_DIR}/.lock"
 LOCK_HELD_RC=75
 DRIVER_LOCK=""
+
+# Every wait in the driver goes through here. fd 8 is the driver lock, and a
+# child keeps a copy of it: a plain `sleep` outliving a SIGKILLed driver held the
+# lock for up to a poll interval, so an immediate restart found it taken.
+nap() { sleep "$1" 8>&-; }
 
 # Is $1 this driver or one of its own subshells? Those share its argv and
 # environment, and the scan below runs inside $(...) — so its helpers are
@@ -176,7 +208,17 @@ is_self_or_descendant() {  # $1 = pid
 # Conservative on purpose: a candidate with NO LOG_DIR in its environment counts,
 # since its built-in default may well be ours.
 other_driver_pid() {
-    local pid env_dir
+    local pid env_dir ld sd
+    # Registered drivers (every OS).
+    while IFS=$'\t' read -r pid ld sd; do
+        [ -n "$pid" ] || continue
+        is_self_or_descendant "$pid" && continue
+        [ "$ld" = "$LOG_DIR" ] || continue
+        printf '%s\n' "$pid"
+        return 0
+    done < <(registry_list)
+    # Linux: also a driver started before the registry existed.
+    [ -d /proc/self ] || return 0
     for pid in $(pgrep -u "$(id -u)" -f 'run-model-queue\.sh' 2>/dev/null); do
         is_self_or_descendant "$pid" && continue
         is_driver_process "$pid" || continue
@@ -202,26 +244,23 @@ if [ -d "$LEGACY_LOCK" ]; then
         && echo "[$(now_iso)] removed stale lock directory ${LEGACY_LOCK} (no driver was holding it)"
 fi
 
-if command -v flock >/dev/null 2>&1; then
-    exec 8>>"$LOCK_FILE" || { echo "ERROR: cannot open driver lock $LOCK_FILE"; exit 1; }
-    if ! flock -n 8; then
-        echo "ERROR: another driver holds the lock: $LOCK_FILE (pid $(cat "$LOCK_FILE" 2>/dev/null || echo '?'))"
-        exit "$LOCK_HELD_RC"
-    fi
-    # The content is only for the message above; the lock is the flock itself.
-    # Never delete this file: a process could open the old inode and "win" a lock
-    # nobody else can see.
-    echo "$$" > "$LOCK_FILE"
-    DRIVER_LOCK=flock
-else
-    # No flock (e.g. macOS without util-linux): the old behaviour, stale-on-SIGKILL.
-    if ! mkdir "$LEGACY_LOCK" 2>/dev/null; then
-        echo "ERROR: another driver holds the lock: $LEGACY_LOCK"
-        echo "       If no scheduler is running, remove it:  rmdir $LEGACY_LOCK"
-        exit "$LOCK_HELD_RC"
-    fi
-    DRIVER_LOCK=mkdir
+# flock is required. The old mkdir lock survives a SIGKILL as a stale directory,
+# and without /proc (macOS) the guard above could not tell it from a live one.
+if ! command -v flock >/dev/null 2>&1; then
+    echo "ERROR: flock is not installed; the driver needs it for its lock." >&2
+    echo "       macOS: brew install flock    Linux: it is part of util-linux." >&2
+    exit 1
 fi
+exec 8>>"$LOCK_FILE" || { echo "ERROR: cannot open driver lock $LOCK_FILE"; exit 1; }
+if ! flock -n 8; then
+    echo "ERROR: another driver holds the lock: $LOCK_FILE (pid $(cat "$LOCK_FILE" 2>/dev/null || echo '?'))"
+    exit "$LOCK_HELD_RC"
+fi
+# The content is only for the message above; the lock is the flock itself.
+# Never delete this file: a process could open the old inode and "win" a lock
+# nobody else can see.
+echo "$$" > "$LOCK_FILE"
+DRIVER_LOCK=flock
 cleanup() {
     # Take the orchestrator down with us.
     #
@@ -238,6 +277,7 @@ cleanup() {
         fi
     fi
     [ "$DRIVER_LOCK" = mkdir ] && rmdir "$LEGACY_LOCK" 2>/dev/null
+    registry_remove
     rm -f "${STATE_FILE}.tmp.$$" "$(status_file).tmp.$$" 2>/dev/null
     rm -f "$(driver_info)" 2>/dev/null
 }
@@ -245,6 +285,8 @@ trap cleanup EXIT
 # Without these, Ctrl-C and `kill` bypass the EXIT trap's cleanup in some shells.
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# Findable from here on by discovery and by other drivers; cleanup unregisters.
+registry_add "$LOG_DIR" "$SCRIPT_DIR"
 
 # ---- state arrays (index-aligned, rebuilt on every queue re-read) ----
 Q_MODEL=(); Q_MODE=(); Q_LIB=(); Q_WAVE=(); Q_QUEUE=(); Q_KEY=(); Q_HOLD=(); Q_CPUS=()
@@ -296,6 +338,11 @@ _parse_queue_unlocked() {
         if [ "$QL_MODE" != "ersilia" ] && [ "$QL_MODE" != "singularity" ]; then
             add_job "$QL_MODEL" "${QL_MODE:-?}" "${lib:-NA}" "$wave" "$queue" 0 \
                     skipped "unknown mode '${QL_MODE:-}' (want ersilia|singularity)" "$cpus"
+            continue
+        fi
+        if [ "$QL_MODE" = "singularity" ] && store_is_local; then
+            add_job "$QL_MODEL" "$QL_MODE" "${lib:-NA}" "$wave" "$queue" 0 \
+                    skipped "singularity needs DISPATCH=slurm; use ersilia on this machine" "$cpus"
             continue
         fi
         if [ -z "$lib" ]; then
@@ -570,22 +617,25 @@ cancel_child() {  # $1 = logfile
     # wave finished, runs its verify step, finds the whole wave missing from S3 — and
     # fires its own "resubmit once" retry. You cancel a wave and a fresh one appears.
     # A dead orchestrator cannot react to anything.
-    local waited=0
+    local waited=0 limit=10
+    # A serve orchestrator closes its model on TERM, and stopping a Docker
+    # container takes a while: give it that time before reaching for KILL.
+    store_is_local && limit="$SERVE_STOP_SECONDS"
     if [ -n "${CHILD_PID:-}" ]; then
         log_line "  stopping orchestrator pid ${CHILD_PID} and its children" \
                  "(driver pid $$, pgid ${SELF_PGID})"
         kill_tree TERM "$CHILD_PID"
-        while kill -0 "$CHILD_PID" 2>/dev/null && [ "$waited" -lt 10 ]; do
-            sleep 1; waited=$((waited + 1))
+        while kill -0 "$CHILD_PID" 2>/dev/null && [ "$waited" -lt "$limit" ]; do
+            nap 1; waited=$((waited + 1))
         done
         if kill -0 "$CHILD_PID" 2>/dev/null; then
             log_line "  did not exit on TERM after ${waited}s — sending KILL"
             kill_tree KILL "$CHILD_PID"
-            sleep 1
+            nap 1
         fi
         if kill -0 "$CHILD_PID" 2>/dev/null; then
             log_line "  WARNING: orchestrator pid ${CHILD_PID} is still alive."
-            log_line "           Check by hand: pgrep -af 'submit-(ersilia|singularity)-waves'"
+            log_line "           Check by hand: pgrep -lf 'submit-(ersilia|singularity)-waves|run-ersilia-serve'"
         else
             log_line "  orchestrator stopped"
         fi
@@ -610,13 +660,13 @@ run_job() {  # $1 = index
 
     log_line "----- ${model} (${mode}) on ${lib}  [queue pos $((i + 1))/${#Q_MODEL[@]}]${cpus:+  cpus=${cpus}} -----"
 
-    # resume fast-skip: already complete in S3?
-    Q_TOTAL[i]="$(s3_count_input "$lib")"
-    Q_DONE[i]="$(s3_count_output "$model" "$lib" "$mode")"
+    # resume fast-skip: all results already there?
+    Q_TOTAL[i]="$(count_input "$lib")"
+    Q_DONE[i]="$(count_output "$model" "$lib" "$mode")"
     if [ "${Q_TOTAL[i]}" -gt 0 ] && [ "${Q_DONE[i]}" -ge "${Q_TOTAL[i]}" ]; then
         Q_FIN[i]="$(now_iso)"
-        set_status "$i" done "already complete in S3"
-        log_line "  already complete in S3 (${Q_DONE[i]}/${Q_TOTAL[i]}) — skipping dispatch"
+        set_status "$i" done "already complete"
+        log_line "  already complete (${Q_DONE[i]}/${Q_TOTAL[i]} in $(store_path output "$lib" "$model")) — skipping dispatch"
         return 0
     fi
 
@@ -628,21 +678,32 @@ run_job() {  # $1 = index
     # dispatch/poll/cancel path stays testable off-cluster.
     if [ "$DRY_RUN" -eq 1 ]; then
         log_line "  [dry-run] skipping SIF pre-flight for ${model}"
+    elif store_is_local; then
+        :   # serve: no SIF; the orchestrator's `ersilia fetch` gets the model
     elif ! ensure_sif "$model" "${Q_LOG[i]}"; then
         Q_FIN[i]="$(now_iso)"
         set_status "$i" missing-files "SIF not found: ${SIF_DIR}/${model}.sif"
         log_line "  SIF not found: ${SIF_DIR}/${model}.sif — missing-files, continuing"
         return 0
     fi
-    # pre-flight: input library must have chunks in S3
+    # pre-flight: the input library must have chunks. The note names the real
+    # cause (missing folder, S3 unreachable, or genuinely empty), because a bare
+    # count of 0 looks the same for all three and missing-files is never retried.
     if [ "${Q_TOTAL[i]}" -le 0 ]; then
+        local problem
+        problem="$(input_problem "$lib")"
+        problem="${problem:-no input chunks in $(store_path input "$lib")}"
         Q_FIN[i]="$(now_iso)"
-        set_status "$i" missing-files "no input chunks in s3://${S3_BUCKET}/input/${lib}/"
-        log_line "  no input chunks in s3://${S3_BUCKET}/input/${lib}/ — missing-files, continuing"
+        set_status "$i" missing-files "$problem"
+        log_line "  ${problem} — missing-files, continuing"
         return 0
     fi
 
-    script="${WAVES_DIR}/$(mode_script "$mode")"
+    if store_is_local; then
+        script="$SERVE_SCRIPT"
+    else
+        script="${WAVES_DIR}/$(mode_script "$mode")"
+    fi
 
     # Launch in its own process group (setsid) so a cancel can take down the whole
     # tree, and in the background so this driver keeps servicing control requests.
@@ -652,17 +713,25 @@ run_job() {  # $1 = index
     # nothing at all; an env var it does not know about is simply ignored, so a
     # partially-synced /shared degrades to "no override" instead of to a wrong
     # partition. Empty means "pass nothing", leaving the worker's #SBATCH in charge.
-    if [ "$DRY_RUN" -eq 1 ]; then
+    if [ "$DRY_RUN" -eq 1 ] && store_is_local; then
+        log_line "  [dry-run] DATA_DIR=$DATA_DIR ERSILIA_BIN=$ERSILIA_BIN $script $model $lib"
+        $SCHED_DETACH sleep "${SCHED_FAKE_DURATION:-30}" >>"${Q_LOG[i]}" 2>&1 8>&- &
+    elif [ "$DRY_RUN" -eq 1 ]; then
         log_line "  [dry-run] S3_BUCKET=$S3_BUCKET POLL_SECONDS=$POLL_SECONDS ${cpus:+CPUS_PER_TASK=$cpus }$script $model $lib $wave $queue"
         # A real sleeping child, so the poll/cancel path is genuinely exercised.
-        setsid sleep "${SCHED_FAKE_DURATION:-30}" >>"${Q_LOG[i]}" 2>&1 8>&- &
+        $SCHED_DETACH sleep "${SCHED_FAKE_DURATION:-30}" >>"${Q_LOG[i]}" 2>&1 8>&- &
+    elif store_is_local; then
+        log_line "  dispatch: $script $model $lib  (log: ${Q_LOG[i]})"
+        log_line "  serve ignores wave=${wave} queue=${queue}${cpus:+ cpus=$cpus}"
+        DATA_DIR="$DATA_DIR" ERSILIA_BIN="$ERSILIA_BIN" \
+            $SCHED_DETACH "$script" "$model" "$lib" >>"${Q_LOG[i]}" 2>&1 8>&- &
     else
         log_line "  dispatch: ${cpus:+CPUS_PER_TASK=$cpus }$script $model $lib $wave $queue  (log: ${Q_LOG[i]})"
         # 8>&- : the orchestrator must not inherit the driver lock. A flock lives
         # as long as ANY copy of its fd, so an orphan outliving a killed driver
         # would otherwise keep every new driver from starting for hours.
         S3_BUCKET="$S3_BUCKET" POLL_SECONDS="$POLL_SECONDS" CPUS_PER_TASK="$cpus" \
-            setsid "$script" "$model" "$lib" "$wave" "$queue" >>"${Q_LOG[i]}" 2>&1 8>&- &
+            $SCHED_DETACH "$script" "$model" "$lib" "$wave" "$queue" >>"${Q_LOG[i]}" 2>&1 8>&- &
     fi
     CHILD_PID=$!
     CHILD_PGID="$(ps -o pgid= -p "$CHILD_PID" 2>/dev/null | tr -d ' ')"
@@ -685,10 +754,10 @@ run_job() {  # $1 = index
         if [ -n "${FORCE_REFRESH:-}" ] || [ $((nowsec - last_refresh)) -ge "$REFRESH_SECONDS" ]; then
             FORCE_REFRESH=""
             last_refresh="$nowsec"
-            Q_DONE[i]="$(s3_count_output "$model" "$lib" "$mode")"
+            Q_DONE[i]="$(count_output "$model" "$lib" "$mode")"
             persist_job "$i"
         fi
-        sleep "$CTL_POLL"
+        nap "$CTL_POLL"
     done
 
     wait "$CHILD_PID" 2>/dev/null; rc=$?
@@ -696,7 +765,7 @@ run_job() {  # $1 = index
     CHILD_PID=""; CHILD_PGID=""; CURRENT_LOG=""; CURRENT_KEY=""
 
     Q_FIN[i]="$(now_iso)"
-    Q_DONE[i]="$(s3_count_output "$model" "$lib" "$mode")"
+    Q_DONE[i]="$(count_output "$model" "$lib" "$mode")"
 
     if [ "$cancelled" -eq 1 ]; then
         set_status "$i" cancelled \
@@ -753,7 +822,7 @@ IDLE_ANNOUNCED=0
 # operator can then kill it, or let it finish before resuming.
 warn_orphan_orchestrators() {
     local pids
-    pids="$(pgrep -u "$(id -u)" -f 'submit-(ersilia|singularity)-waves\.sh' 2>/dev/null | tr '\n' ' ')"
+    pids="$(pgrep -u "$(id -u)" -f 'submit-(ersilia|singularity)-waves\.sh|run-ersilia-serve\.sh' 2>/dev/null | tr '\n' ' ')"
     [ -n "$pids" ] || return 0
     echo "=========================================="
     echo "WARNING: a wave orchestrator is ALREADY RUNNING (pid(s): ${pids})"
@@ -823,7 +892,7 @@ while :; do
             log_line "PAUSED (sched-ctl.sh resume to continue)"
             IDLE_ANNOUNCED=paused
         fi
-        sleep "$CTL_POLL"
+        nap "$CTL_POLL"
         continue
     fi
 
@@ -840,7 +909,7 @@ while :; do
             log_line "queue file has no jobs — waiting for additions (sched-ctl.sh add ...)"
             IDLE_ANNOUNCED=empty
         fi
-        sleep "$IDLE_POLL"
+        nap "$IDLE_POLL"
         continue
     fi
 
@@ -857,7 +926,7 @@ while :; do
             log_line "nothing runnable (all done/failed/held) — waiting for queue changes"
             IDLE_ANNOUNCED=idle
         fi
-        sleep "$IDLE_POLL"
+        nap "$IDLE_POLL"
         continue
     fi
     IDLE_ANNOUNCED=0

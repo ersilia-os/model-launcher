@@ -261,13 +261,22 @@ class CommandLine:
         Driver defaults shown as ghosts: ``library``, ``wave``, ``queue``.
     max_cpus : int
         Upper bound for ``cpus=N``.
+    modes : list of str, optional
+        Modes this target accepts; all of ``MODES`` by default.
     """
 
-    def __init__(self, libraries: list[str], defaults: dict, max_cpus: int) -> None:
+    def __init__(
+        self,
+        libraries: list[str],
+        defaults: dict,
+        max_cpus: int,
+        modes: list[str] | None = None,
+    ) -> None:
         self.text = ""
         self.libraries = list(libraries)
         self.defaults = defaults
         self.max_cpus = max_cpus
+        self.modes = list(modes or MODES)
         self.highlighted = 0
 
     # -- reading ---------------------------------------------------------
@@ -291,7 +300,7 @@ class CommandLine:
         """Choices for the token being typed, as (value, is_default)."""
         token, field = self.current
         if field == "mode":
-            return [(m, False) for m in MODES if m.startswith(token)]
+            return [(m, False) for m in self.modes if m.startswith(token)]
         if field == "library":
             default = self.defaults.get("library", "")
             names = sorted(self.libraries, key=lambda name: name != default)
@@ -372,8 +381,8 @@ class CommandLine:
         cpus = [p[5:] for p, f in self.parts() if f == "flag" and p.startswith("cpus=")]
         if not fields["model"]:
             return "a model id is required"
-        if fields["mode"] not in MODES:
-            return "mode must be ersilia or singularity"
+        if fields["mode"] not in self.modes:
+            return f"mode must be {' or '.join(self.modes)}"
         wave = fields["wave"]
         if wave and not (wave.isdigit() and 1 <= int(wave) <= 1000):
             return "wave size must be 1..1000"
@@ -439,6 +448,8 @@ class AddScreen(Overlay[dict | None]):
         ``host · dispatch``, for the header.
     sif_dir : str
         Where the model's SIF is expected; empty to leave the line out.
+    modes : list of str, optional
+        Modes this target accepts; all of ``MODES`` by default.
     """
 
     DEFAULT_CSS = "AddScreen { align: left bottom; }"
@@ -451,9 +462,10 @@ class AddScreen(Overlay[dict | None]):
         max_cpus: int,
         where: str,
         sif_dir: str = "",
+        modes: list[str] | None = None,
     ) -> None:
         super().__init__()
-        self.line = CommandLine(libraries, defaults, max_cpus)
+        self.line = CommandLine(libraries, defaults, max_cpus, modes)
         self.where = where
         self.sif_dir = sif_dir
         self.problem = ""
