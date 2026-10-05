@@ -858,8 +858,10 @@ class HostSlot:
 
     ``state`` picks the glyph: running, paused, stopped, none, offline or
     checking. ``strip`` (one status per queued job) and ``running`` (model,
-    done, total) are known only for the host the dashboard is connected to;
-    ``None`` draws ``—``.
+    done, total) come from the connected host's live snapshot, or from a quick
+    read of another host's queue; ``None`` draws ``—``. ``recorded`` marks the
+    counts as the driver's last recount rather than live, and ``others`` is how
+    many more schedulers the host runs than the one shown.
     """
 
     name: str
@@ -870,6 +872,8 @@ class HostSlot:
     current: bool = False
     strip: tuple[str, ...] | None = None
     running: tuple[str, int, int] | None = None
+    recorded: bool = False
+    others: int = 0
 
 
 #: How ``Target.via`` reads in the VIA column (13 cells wide).
@@ -952,7 +956,11 @@ def hosts_view(
                 sx = cv.put(sx, y, "▮", t.status_style(status)[0])
             if len(slot.strip) > STRIP_WIDTH:
                 cv.put(sx, y, "…", t.muted)
-            cv.put(58, y + 1, f"{len(slot.strip)} jobs", t.muted)
+            n = len(slot.strip)
+            jobs = f"{n} job" if n == 1 else f"{n} jobs"
+            if slot.others:
+                jobs += f" · +{slot.others} more"
+            cv.put(58, y + 1, jobs, t.muted)
         else:
             cv.put(58, y, "—", t.track)
         if slot.running:
@@ -960,6 +968,11 @@ def hosts_view(
             paused = slot.state == "paused"
             colour = t.warn if paused else t.live
             label = f"{model}  (paused)" if paused else model
+            # Another host's counts are the driver's last recount, minutes
+            # old: drawn quieter, and said so, so they never pass for live.
+            if slot.recorded:
+                label += " · last recount"
+                colour = mix(colour, t.muted, 0.6)
             cv.put(84, y, elide(label, width - 86), t.muted if paused else t.fg)
             bar(cv, 84, y + 1, 24, done, total, colour)
             cv.put(110, y + 1, pct(done, total), colour)

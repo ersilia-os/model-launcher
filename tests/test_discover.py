@@ -17,7 +17,7 @@ import pytest
 
 from model_launcher.cli.target import resolve_target
 from model_launcher.core import target as target_mod
-from model_launcher.core.discover import Driver, discover_drivers
+from model_launcher.core.discover import Driver, discover_drivers, peek_queue
 from model_launcher.core.remote import ctl_path
 from model_launcher.core.runner import LocalRunner
 
@@ -112,3 +112,27 @@ def test_an_explicit_ctl_skips_discovery(drivers):
     target = resolve_target({**OBJ, "ctl": "/elsewhere/sched-ctl.sh"})
     assert target.runner.ctl == "/elsewhere/sched-ctl.sh"
     assert target.source is None
+
+
+def test_peek_queue_reads_a_drivers_queue(running_scheduler):
+    """What the hosts screen shows for a host it is not connected to."""
+    scheduler = running_scheduler
+    scheduler.write_queue("eos_x ersilia testlib")
+    pid = int(
+        next(
+            line[4:]
+            for line in (scheduler.log_dir / "driver.info").read_text().splitlines()
+            if line.startswith("pid=")
+        )
+    )
+    driver = Driver(pid=pid, log_dir=str(scheduler.log_dir), ctl=str(ctl_path()))
+
+    snap = peek_queue(None, driver)
+
+    assert snap is not None
+    assert [job.model for job in snap.jobs] == ["eos_x"]
+
+
+def test_peek_queue_never_raises(tmp_path):
+    driver = Driver(pid=1, log_dir=str(tmp_path), ctl=str(tmp_path / "no-ctl.sh"))
+    assert peek_queue(None, driver) is None

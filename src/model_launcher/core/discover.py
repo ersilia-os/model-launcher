@@ -17,6 +17,7 @@ from __future__ import annotations
 import posixpath
 from dataclasses import dataclass
 
+from .model import Snapshot, parse_dump
 from .remote import CTL_NAME
 from .runner import LocalRunner, Runner, RunnerError, SshRunner
 
@@ -211,3 +212,49 @@ def probe_host(host: str | None) -> HostStatus:
     if not drivers:
         return HostStatus("none")
     return HostStatus("running", drivers=tuple(drivers))
+
+
+def peek_queue(
+    host: str | None, driver: Driver, s3_bucket: str | None = None
+) -> Snapshot | None:
+    """Read one driver's queue, quickly, for a host list.
+
+    A plain ``dump``: the jobs, their statuses and the counts the driver last
+    recorded. It never counts from S3 (invariant 11), so it is cheap enough to
+    run for every host a list shows; the counts can be a recount interval old.
+
+    Parameters
+    ----------
+    host : str or None
+        SSH alias of the driver's machine, or None for this machine.
+    driver : Driver
+        The driver to read, as :func:`probe_host` found it.
+    s3_bucket : str, optional
+        Passed on to ctl, as for any other call.
+
+    Returns
+    -------
+    Snapshot or None
+        The snapshot, or None if it could not be read. Never raises.
+    """
+    if host:
+        runner: Runner = SshRunner(
+            ctl=driver.ctl,
+            log_dir=driver.log_dir,
+            s3_bucket=s3_bucket,
+            host=host,
+            ssh_opts=list(PROBE_SSH_OPTS),
+            timeout=PROBE_TIMEOUT,
+        )
+    else:
+        runner = LocalRunner(
+            ctl=driver.ctl,
+            log_dir=driver.log_dir,
+            s3_bucket=s3_bucket,
+            timeout=PROBE_TIMEOUT,
+        )
+    try:
+        snap = parse_dump(runner.dump())
+    except RunnerError:
+        return None
+    return None if snap.error else snap

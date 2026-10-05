@@ -324,6 +324,9 @@ def scheduler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scheduler:
     # through a LocalRunner) must read the registry this instance's drivers
     # write. Linux would still find them through /proc; macOS only has this.
     monkeypatch.setenv("SCHED_REGISTRY_DIR", str(tmp_path / "drivers"))
+    # Likewise ctl run from the test process must never read this machine's own
+    # ~/.config/model-launcher/scheduler.conf.
+    monkeypatch.setenv("SCHEDULER_CONF", str(tmp_path / "scheduler.conf"))
 
     log_dir = tmp_path / "logs"
     log_dir.mkdir()

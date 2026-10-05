@@ -22,8 +22,9 @@ from textual.app import ComposeResult
 from textual.events import Click, Key
 from textual.screen import Screen
 
-from ..core.discover import Driver, HostStatus, probe_host
+from ..core.discover import Driver, HostStatus, peek_queue, probe_host
 from ..core.hosts import LOCAL, available_targets, load_last_host
+from ..core.model import Snapshot
 from ..core.target import Resolution, choose, resolve
 from . import draw
 from .theme import Tokens
@@ -112,6 +113,8 @@ class HostScreen(Screen[Resolution | None]):
         self.rows: dict[str, HostRow] = {}
         self.status: dict[str, str] = {}
         self._probed: dict[str, HostStatus] = {}
+        #: other hosts' queues, from a plain dump after a RUNNING probe
+        self._peeked: dict[str, Snapshot] = {}
         self._drivers: list[Driver] = []
         self._driver_host: HostRow | None = None
         self._busy = False
@@ -139,6 +142,7 @@ class HostScreen(Screen[Resolution | None]):
     def _show_rows(self, rows: list[HostRow]) -> None:
         self.rows = {row.key: row for row in rows}
         self._probed = {}
+        self._peeked = {}
         for row in rows:
             self.status[row.key] = "checking…" if row.reachable else "offline"
         preferred = self.current or load_last_host()
@@ -164,7 +168,23 @@ class HostScreen(Screen[Resolution | None]):
             return
         self.status[key] = status.label
         self._probed[key] = status
+        self._peeked.pop(key, None)
         self._note = f"probed {time.strftime('%H:%M:%S')}"
+        self._redraw()
+        # The connected host's queue is already on the dashboard, live.
+        if status.state == "running" and key != self.current:
+            row = self.rows[key]
+            self.run_worker(lambda: self._peek(row, status), thread=True, group="peek")
+
+    def _peek(self, row: HostRow, status: HostStatus) -> None:
+        snap = peek_queue(row.host, status.drivers[0], self.options.get("s3_bucket"))
+        self.app.call_from_thread(self._show_peek, row.key, status, snap)
+
+    def _show_peek(self, key: str, status: HostStatus, snap: Snapshot | None) -> None:
+        # Dropped if the screen closed, or the host was probed again meanwhile.
+        if not self.is_mounted or self._probed.get(key) is not status or snap is None:
+            return
+        self._peeked[key] = snap
         self._redraw()
 
     # -- drawing ---------------------------------------------------------------
@@ -182,8 +202,12 @@ class HostScreen(Screen[Resolution | None]):
             state = {"running": "running", "none": "none"}.get(probed.state, "offline")
         current = row.key == self.current
         strip = running = None
+        snap: Snapshot | None = None
         if current:
             snap = self.app.snapshot  # type: ignore[attr-defined]
+        elif state == "running":
+            snap = self._peeked.get(row.key)
+        if snap is not None:
             strip = tuple(job.status for job in snap.jobs)
             if snap.driver_alive and snap.paused:
                 state = "paused"
@@ -199,6 +223,8 @@ class HostScreen(Screen[Resolution | None]):
             current=current,
             strip=strip,
             running=running,
+            recorded=snap is not None and not current,
+            others=max(0, len(probed.drivers) - 1) if probed else 0,
         )
 
     def _slots(self) -> tuple[str, list[draw.HostSlot]]:
@@ -287,6 +313,7 @@ class HostScreen(Screen[Resolution | None]):
         if row.reachable:
             self.status[row.key] = "checking…"
             self._probed.pop(row.key, None)
+            self._peeked.pop(row.key, None)
             self._redraw()
             self._start_probe(row)
 
