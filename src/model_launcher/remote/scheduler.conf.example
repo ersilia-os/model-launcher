@@ -64,3 +64,8 @@
 # in the packaged `slurm/` directory beside this script. Set this only for a
 # nonstandard layout.
 # WAVES_DIR="${WAVES_DIR:-}"
+
+# SLURM: at the end of a run, bisect the chunks that still fail, so a chunk with
+# a few bad SMILES completes with those rows empty (listed in
+# _bad_smiles_<N>.csv). 0 leaves such chunks failed, as before.
+# BISECT="${BISECT:-1}"

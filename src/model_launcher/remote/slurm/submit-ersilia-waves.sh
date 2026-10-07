@@ -74,6 +74,11 @@ FAILED_LOG="${OUTPUT_DIR}/_failed_chunks.txt"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_JOB="${SCRIPT_DIR}/run-ersilia-wave-job.sh"
 [ -f "$RUN_JOB" ] || RUN_JOB="/shared/scripts/run-ersilia-wave-job.sh"
+# End-of-run bisect of chunks that keep failing (see bisect.sh).
+BISECT_JOB="${SCRIPT_DIR}/run-ersilia-bisect-piece.sh"
+RESULT_PREFIX="${MODEL_ID}_results_"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/bisect.sh" || { echo "ERROR: cannot source ${SCRIPT_DIR}/bisect.sh"; exit 1; }
 
 if [ ! -f "/shared/sif-files/${MODEL_ID}.sif" ]; then
     echo "ERROR: Model SIF not found: /shared/sif-files/${MODEL_ID}.sif"
@@ -151,8 +156,9 @@ echo ""
 # --- helpers ---------------------------------------------------------------
 
 submit_and_wait() {
-    # $1 = chunk-list file ; echoes the array job id
-    local list="$1" w
+    # $1 = chunk-list file ; $2 = job script (default: the wave worker) ;
+    # echoes the array job id
+    local list="$1" job="${2:-$RUN_JOB}" w
     w=$(wc -l < "$list" | tr -d ' ')
     local aid
     # ${arr[@]+"${arr[@]}"} — expanding an EMPTY array as "${arr[@]}" is an unbound
@@ -160,7 +166,7 @@ submit_and_wait() {
     # expands to nothing at all when there is no override.
     aid=$(sbatch --partition="$QUEUE" ${SBATCH_CPUS[@]+"${SBATCH_CPUS[@]}"} \
             --array=0-$((w - 1)) \
-            "$RUN_JOB" "$MODEL_ID" "$list" "$OUTPUT_DIR" 2>&1 \
+            "$job" "$MODEL_ID" "$list" "$OUTPUT_DIR" 2>&1 \
           | grep -oP 'Submitted batch job \K\d+')
     if [ -z "$aid" ]; then
         echo "  ERROR: sbatch submission failed for $list" >&2
@@ -249,6 +255,14 @@ while [ "$START" -le "$REMAINING_COUNT" ]; do
         if [ "$NF2" -gt 0 ]; then
             echo "  $NF2 chunk(s) still failing after retry — logged to $FAILED_LOG (continuing)."
             cat "${FAILS}.2" >> "$FAILED_LOG"
+            # A failed chunk must not look done: its partial or wrong-length result
+            # is kept out of the sync below, and the copy its worker may already
+            # have uploaded is removed. Resume and progress count S3 objects.
+            while read -r inpath; do
+                num=$(basename "$inpath" .csv | grep -oP '\d+$')
+                rm -f "${OUTPUT_DIR}/${MODEL_ID}_results_${num}.csv"
+                aws s3 rm "${S3_OUTPUT}${MODEL_ID}_results_${num}.csv" >/dev/null 2>&1 || true
+            done < "${FAILS}.2"
         fi
     fi
 
@@ -267,8 +281,11 @@ while [ "$START" -le "$REMAINING_COUNT" ]; do
     WAVE=$(( WAVE + 1 ))
 done
 
-# --- 5. Summary ------------------------------------------------------------
-TOTAL_FAILED=$(wc -l < "$FAILED_LOG" | tr -d ' ')
+# --- 5. Bisect what still fails ---------------------------------------------
+bisect_failed "$FAILED_LOG" || { echo "ERROR: bisect could not submit its pieces."; exit 1; }
+
+# --- 6. Summary ------------------------------------------------------------
+TOTAL_FAILED=$(grep -c . "$FAILED_LOG")
 echo ""
 echo "=========================================="
 echo "All waves complete for $LIBRARY_NAME / $MODEL_ID"
@@ -277,8 +294,11 @@ echo "  Persistent failures       : $TOTAL_FAILED"
 echo "=========================================="
 if [ "$TOTAL_FAILED" -gt 0 ]; then
     echo "Failed chunk inputs are listed in: $FAILED_LOG"
-    echo "Isolate bad molecules with the bisect worker, e.g.:"
-    echo "  bash /shared/scripts/split-ersilia-chunk.sh $MODEL_ID $LIBRARY_NAME <chunk_num>"
+    if [ "$BISECT" = "1" ]; then
+        echo "Bisect could not rescue them (no piece of the chunk ran at all; see the log above)."
+    else
+        echo "Bisect is off (BISECT=0); rerun with BISECT=1 to rescue chunks with a few bad molecules."
+    fi
     exit 1
 fi
 echo "Verify in S3:"
