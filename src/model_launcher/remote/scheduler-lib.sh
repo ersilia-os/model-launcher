@@ -268,6 +268,18 @@ list_libraries() {  # $1 = any non-empty value forces a refresh
     return 0
 }
 
+# The note for a job its orchestrator finished, from the bisect summary it wrote
+# to the job log after byte $2 (this run's part of a log that earlier runs also
+# wrote to). Empty unless some molecules were written as empty rows.
+bisect_note() {  # $1 = job log  $2 = byte offset where this run began
+    local line blanks
+    [ -f "$1" ] || return 0
+    line="$(tail -c +$(( ${2:-0} + 1 )) "$1" | grep '^BISECT: ' | tail -n 1)"
+    blanks="$(printf '%s\n' "$line" | sed -n 's/.*; \([0-9][0-9]*\) molecule(s) written as empty rows.*/\1/p')"
+    [ -n "$blanks" ] && [ "$blanks" -gt 0 ] || return 0
+    printf '%s molecule(s) failed and were left empty; see _bad_smiles_*.csv\n' "$blanks"
+}
+
 # Map a run mode to its wave-orchestrator script basename.
 mode_script() {  # $1 = mode
     case "$1" in

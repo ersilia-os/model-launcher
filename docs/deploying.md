@@ -43,8 +43,19 @@ remote/
     ├── submit-ersilia-waves.sh
     ├── submit-singularity-waves.sh
     ├── run-ersilia-wave-job.sh
-    └── run-singularity-wave-job.sh
+    ├── run-singularity-wave-job.sh
+    ├── bisect.sh                 end-of-run rescue of chunks a few molecules break
+    ├── bisect-pieces.py          its split and merge (needs python3 on the head node)
+    ├── run-ersilia-bisect-piece.sh
+    └── run-singularity-bisect-piece.sh
 ```
+
+A chunk that still fails after the wave retry is bisected at the end of the run:
+it is split into pieces, down to single molecules, and a molecule that fails on
+its own is written as an empty row. The rescued chunk is uploaded like any other,
+with its failing molecules in `_bad_smiles_<N>.csv` beside it, and the job ends
+`done` with a note saying how many. Set `BISECT=0` in `scheduler.conf` to turn
+it off.
 
 From your laptop, in the model-launcher repo root (`$SRC`, `$DEST` and `$H`
 are local variables, so keep to one terminal session):

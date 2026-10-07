@@ -699,6 +699,11 @@ run_job() {  # $1 = index
         return 0
     fi
 
+    # Where this run's lines start in the job log, which earlier runs appended to:
+    # the bisect note must come from this run only.
+    local log_start
+    log_start="$(wc -c < "${Q_LOG[i]}" 2>/dev/null || echo 0)"
+
     if store_is_local; then
         script="$SERVE_SCRIPT"
     else
@@ -731,6 +736,7 @@ run_job() {  # $1 = index
         # as long as ANY copy of its fd, so an orphan outliving a killed driver
         # would otherwise keep every new driver from starting for hours.
         S3_BUCKET="$S3_BUCKET" POLL_SECONDS="$POLL_SECONDS" CPUS_PER_TASK="$cpus" \
+        BISECT="${BISECT:-1}" \
             $SCHED_DETACH "$script" "$model" "$lib" "$wave" "$queue" >>"${Q_LOG[i]}" 2>&1 8>&- &
     fi
     CHILD_PID=$!
@@ -774,7 +780,7 @@ run_job() {  # $1 = index
         return 130
     fi
     if [ "$rc" -eq 0 ]; then
-        set_status "$i" done ""
+        set_status "$i" done "$(bisect_note "${Q_LOG[i]}" "$log_start")"
         log_line "  done (${Q_DONE[i]}/${Q_TOTAL[i]})"
     else
         set_status "$i" failed "orchestrator exited rc=$rc"

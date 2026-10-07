@@ -42,6 +42,9 @@ MODEL_ID="${1:-}"
 CHUNK_LIST="${2:-}"
 OUTPUT_DIR="${3:-}"
 S3_BUCKET="${S3_BUCKET:-ai2050-ersilia-cluster}"
+# Overridable (sbatch passes the environment on), e.g. to test the end-of-run
+# bisect with a wrapper that fails on chosen molecules. Default: the cluster's.
+ERSILIA_APPTAINER="${ERSILIA_APPTAINER:-/shared/python39/bin/ersilia_apptainer}"
 
 if [ -z "$MODEL_ID" ] || [ -z "$CHUNK_LIST" ] || [ -z "$OUTPUT_DIR" ]; then
     echo "ERROR: Usage: sbatch --array=0-N run-ersilia-wave-job.sh <model_id> <chunk_list> <output_dir>"
@@ -95,7 +98,7 @@ cp "$INPUT_FILE" "$LOCAL_INPUT"
 
 echo "Processing $(( $(wc -l < "$LOCAL_INPUT") - 1 )) molecules..."
 
-/shared/python39/bin/ersilia_apptainer \
+"$ERSILIA_APPTAINER" \
     --sif "$SIF_FILE" \
     --input "$LOCAL_INPUT" \
     --output "$OUTPUT_FILE" --verbose
